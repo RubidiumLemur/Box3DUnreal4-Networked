@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "Box3DUnreal",
+	"Description": "Unreal Engine integration for Box3D, the 3D physics engine by Erin Catto.",
+	"Category": "Other",
+	"CreatedBy": "Antonio Lattanzio",
+	"CreatedByURL": "https://github.com/alattanzio/Box3DUnreal",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "Box3DUnreal",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}
