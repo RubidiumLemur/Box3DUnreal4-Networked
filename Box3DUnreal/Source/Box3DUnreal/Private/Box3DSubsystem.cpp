@@ -4,7 +4,14 @@
 #include "Box3DBodyComponent.h"
 #include "Box3DConversion.h"
 #include "Box3DLog.h"
+#include "Engine/Engine.h"
 #include "Engine/World.h"
+
+static TAutoConsoleVariable<int32> CVarBox3DDebugDraw(
+	TEXT("box3d.DebugDraw"),
+	0,
+	TEXT("Draw box3d dynamic bodies at their actual simulation transform (1 = on)."),
+	ECVF_Cheat);
 
 bool UBox3DSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
@@ -15,7 +22,20 @@ bool UBox3DSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) con
 void UBox3DSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 {
 	Super::OnWorldBeginPlay(InWorld);
-	CreateBox3DWorld();
+
+	// box3d is server-authoritative: only Standalone and servers simulate. A pure
+	// client leaves its actors to UE's replicated movement, so it never spins up a
+	// second (diverging) world.
+	bIsAuthority = InWorld.GetNetMode() != NM_Client;
+	if (bIsAuthority)
+	{
+		CreateBox3DWorld();
+	}
+	else
+	{
+		UE_LOG(LogBox3D, Log,
+			TEXT("box3d: client world - simulation disabled; actors follow replicated movement."));
+	}
 }
 
 void UBox3DSubsystem::Deinitialize()
@@ -53,6 +73,7 @@ void UBox3DSubsystem::DestroyBox3DWorld()
 {
 	// Bodies are owned/destroyed by their components; just drop our references.
 	DynamicBodies.Reset();
+	AllBodies.Reset();
 
 	if (bWorldValid)
 	{
@@ -62,6 +83,14 @@ void UBox3DSubsystem::DestroyBox3DWorld()
 	WorldId = b3_nullWorldId;
 	bWorldValid = false;
 	Accumulator = 0.0;
+}
+
+void UBox3DSubsystem::RegisterBody(UBox3DBodyComponent* Component)
+{
+	if (Component != nullptr)
+	{
+		AllBodies.AddUnique(Component);
+	}
 }
 
 void UBox3DSubsystem::RegisterDynamicBody(UBox3DBodyComponent* Component)
@@ -75,6 +104,7 @@ void UBox3DSubsystem::RegisterDynamicBody(UBox3DBodyComponent* Component)
 void UBox3DSubsystem::UnregisterBody(UBox3DBodyComponent* Component)
 {
 	DynamicBodies.RemoveSingleSwap(Component);
+	AllBodies.RemoveSingleSwap(Component);
 }
 
 bool UBox3DSubsystem::IsTickable() const
@@ -97,6 +127,44 @@ void UBox3DSubsystem::Tick(float DeltaTime)
 	}
 
 	StepFixed(DeltaTime);
+
+	if (CVarBox3DDebugDraw.GetValueOnGameThread() != 0)
+	{
+		DebugDraw();
+	}
+}
+
+void UBox3DSubsystem::DebugDraw()
+{
+	// One-shot confirmation the *new* debug path is running (settles stale-build
+	// questions: if you don't see this line after enabling the cvar, the binary
+	// wasn't rebuilt).
+	static bool bLoggedOnce = false;
+	if (!bLoggedOnce)
+	{
+		bLoggedOnce = true;
+		UE_LOG(LogBox3D, Log, TEXT("box3d.DebugDraw active: drawing bodies at actor pose."));
+	}
+
+	if (GEngine != nullptr)
+	{
+		GEngine->AddOnScreenDebugMessage(
+			static_cast<uint64>(reinterpret_cast<UPTRINT>(this)), 0.0f, FColor::Green,
+			FString::Printf(TEXT("[box3d|actor-pose] %d bodies (%d dynamic) @ %.0f Hz x%d"),
+				AllBodies.Num(), DynamicBodies.Num(), 1.0f / FixedTimeStep, SubStepCount));
+	}
+
+	for (int32 Index = AllBodies.Num() - 1; Index >= 0; --Index)
+	{
+		if (const UBox3DBodyComponent* Body = AllBodies[Index].Get())
+		{
+			Body->DrawDebug();
+		}
+		else
+		{
+			AllBodies.RemoveAtSwap(Index);
+		}
+	}
 }
 
 void UBox3DSubsystem::StepFixed(float DeltaTime)

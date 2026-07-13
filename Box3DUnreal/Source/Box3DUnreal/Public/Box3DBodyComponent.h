@@ -48,6 +48,8 @@ public:
 	void CaptureStepTransform();
 	/** Subsystem hook: write Lerp(prev, curr, Alpha) to the owning actor. */
 	void ApplyInterpolatedTransform(float Alpha);
+	/** Subsystem hook: draw this body's shape at the owning actor's current pose. */
+	void DrawDebug() const;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Box3D")
 	EBox3DBodyType BodyType = EBox3DBodyType::Dynamic;
@@ -91,6 +93,7 @@ protected:
 	void AddShape();
 	void DestroyBody();
 	void EnforceAuthorityContract();
+	void EnableReplication();
 	FVector ComputeAutoBoxHalfExtent() const;
 
 private:
@@ -101,6 +104,9 @@ private:
 
 	/** box3d carries no scale, so we preserve the spawn scale when writing back. */
 	FVector SpawnScale = FVector::OneVector;
+
+	/** Resolved box half-extents (cm) used for Auto/Box shapes; for debug draw. */
+	FVector ResolvedHalfExtent = FVector(50.0, 50.0, 50.0);
 
 	/** Interpolation endpoints in Unreal space (last two fixed steps). */
 	FTransform PrevTransform = FTransform::Identity;

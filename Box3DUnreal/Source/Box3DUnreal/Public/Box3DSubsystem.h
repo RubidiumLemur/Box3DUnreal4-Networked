@@ -37,7 +37,11 @@ public:
 	b3WorldId GetWorldId() const { return WorldId; }
 	bool IsWorldValid() const { return bWorldValid; }
 
-	/** Dynamic bodies need per-step capture + per-frame interpolation. */
+	/** True where box3d simulates: Standalone and servers, never a pure client. */
+	bool IsSimulationAuthority() const { return bIsAuthority; }
+
+	/** All bodies register for debug draw; dynamic ones also register for sync. */
+	void RegisterBody(UBox3DBodyComponent* Component);
 	void RegisterDynamicBody(UBox3DBodyComponent* Component);
 	void UnregisterBody(UBox3DBodyComponent* Component);
 
@@ -45,10 +49,12 @@ protected:
 	void CreateBox3DWorld();
 	void DestroyBox3DWorld();
 	void StepFixed(float DeltaTime);
+	void DebugDraw();
 
 private:
 	b3WorldId WorldId = b3_nullWorldId;
 	bool bWorldValid = false;
+	bool bIsAuthority = false;
 
 	/** Real time carried between frames, consumed in fixed increments. */
 	double Accumulator = 0.0;
@@ -69,4 +75,7 @@ private:
 
 	/** Dynamic bodies driven each frame. Weak so a destroyed actor drops out safely. */
 	TArray<TWeakObjectPtr<UBox3DBodyComponent>> DynamicBodies;
+
+	/** Every registered body (all types), used only for debug draw. */
+	TArray<TWeakObjectPtr<UBox3DBodyComponent>> AllBodies;
 };

@@ -5,6 +5,7 @@
 #include "Box3DConversion.h"
 #include "Box3DLog.h"
 #include "Components/PrimitiveComponent.h"
+#include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 
@@ -21,7 +22,8 @@ void UBox3DBodyComponent::BeginPlay()
 	Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UBox3DSubsystem>() : nullptr;
 	if (Subsystem == nullptr || !Subsystem->IsWorldValid())
 	{
-		UE_LOG(LogBox3D, Warning, TEXT("%s: no valid box3d world; body not created."), *GetNameSafe(GetOwner()));
+		// No simulation in this world (e.g. a network client, where the box3d world
+		// is disabled). The actor follows the server's replicated movement instead.
 		return;
 	}
 
@@ -33,10 +35,35 @@ void UBox3DBodyComponent::BeginPlay()
 
 	AddShape();
 
+	Subsystem->RegisterBody(this); // all types, for debug draw
+
 	if (BodyType == EBox3DBodyType::Dynamic)
 	{
 		EnforceAuthorityContract();
-		Subsystem->RegisterDynamicBody(this);
+		Subsystem->RegisterDynamicBody(this); // dynamic only, for step sync
+		EnableReplication();                  // stream the server transform to clients
+	}
+}
+
+void UBox3DBodyComponent::EnableReplication()
+{
+	AActor* Owner = GetOwner();
+	if (Owner == nullptr || GetWorld()->GetNetMode() == NM_Standalone)
+	{
+		return; // single-player: nothing to replicate
+	}
+
+	if (Owner->GetIsReplicated())
+	{
+		// box3d drives the transform on the server; let UE replicate it to clients,
+		// which move the actor via ReplicatedMovement without simulating locally.
+		Owner->SetReplicateMovement(true);
+	}
+	else
+	{
+		UE_LOG(LogBox3D, Warning,
+			TEXT("%s: actor is not replicated; clients will not see box3d movement. Enable 'Replicates' and 'Replicate Movement' on the actor."),
+			*GetNameSafe(Owner));
 	}
 }
 
@@ -106,8 +133,9 @@ void UBox3DBodyComponent::AddShape()
 	default: // Auto / Box
 	{
 		const FVector HalfExtent = (Shape == EBox3DShape::Box) ? BoxHalfExtent : ComputeAutoBoxHalfExtent();
+		ResolvedHalfExtent = HalfExtent.GetAbs();
 		const b3BoxHull Hull = b3MakeBoxHull(
-			FMath::Abs(HalfExtent.X) * M, FMath::Abs(HalfExtent.Y) * M, FMath::Abs(HalfExtent.Z) * M);
+			ResolvedHalfExtent.X * M, ResolvedHalfExtent.Y * M, ResolvedHalfExtent.Z * M);
 		b3CreateHullShape(BodyId, &ShapeDef, &Hull.base);
 		break;
 	}
@@ -189,4 +217,43 @@ void UBox3DBodyComponent::ApplyInterpolatedTransform(float Alpha)
 	Rotation.Normalize();
 
 	GetOwner()->SetActorLocationAndRotation(Location, Rotation, /*bSweep=*/false, nullptr, ETeleportType::TeleportPhysics);
+}
+
+void UBox3DBodyComponent::DrawDebug() const
+{
+	UWorld* World = GetWorld();
+	AActor* Owner = GetOwner();
+	if (World == nullptr || Owner == nullptr || B3_IS_NULL(BodyId))
+	{
+		return;
+	}
+
+	// Draw at the owning actor's exact current transform. Since box3d already wrote
+	// that transform to the actor this frame, the wireframe is guaranteed to sit on
+	// the mesh - it cannot lead or lag it.
+	const FTransform T = Owner->GetActorTransform();
+	const FVector Location = T.GetLocation();
+	const FQuat Rotation = T.GetRotation();
+
+	// Colour by type: dynamic = green, static = cyan, kinematic = yellow.
+	FColor Color = FColor::Green;
+	switch (BodyType)
+	{
+	case EBox3DBodyType::Static:    Color = FColor::Cyan;   break;
+	case EBox3DBodyType::Kinematic: Color = FColor::Yellow; break;
+	default: break;
+	}
+
+	switch (Shape)
+	{
+	case EBox3DShape::Sphere:
+		DrawDebugSphere(World, Location, Radius, 16, Color, false, -1.0f, 0, 1.0f);
+		break;
+	case EBox3DShape::Capsule:
+		DrawDebugCapsule(World, Location, HalfHeight + Radius, Radius, Rotation, Color, false, -1.0f, 0, 1.0f);
+		break;
+	default: // Auto / Box
+		DrawDebugBox(World, Location, ResolvedHalfExtent, Rotation, Color, false, -1.0f, 0, 1.0f);
+		break;
+	}
 }
