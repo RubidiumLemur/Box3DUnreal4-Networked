@@ -3,9 +3,13 @@
 #include "Box3DSubsystem.h"
 #include "Box3DBodyComponent.h"
 #include "Box3DConversion.h"
+#include "Box3DStaticGeometry.h"
 #include "Box3DLog.h"
+#include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
+#include "Engine/Level.h"
 #include "Engine/World.h"
+#include "GameFramework/Actor.h"
 
 static TAutoConsoleVariable<int32> CVarBox3DDebugDraw(
 	TEXT("box3d.DebugDraw"),
@@ -30,6 +34,19 @@ void UBox3DSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	if (bIsAuthority)
 	{
 		CreateBox3DWorld();
+
+		// Opt-in bulk static path: watch level streaming and scan the already-loaded
+		// levels. Static bodies never move, so only the authority (which simulates)
+		// needs them - clients follow replicated dynamics and create no world.
+		if (bWorldValid && !StaticGeometryTag.IsNone())
+		{
+			LevelAddedHandle = FWorldDelegates::LevelAddedToWorld.AddUObject(this, &UBox3DSubsystem::OnLevelAddedToWorld);
+			LevelRemovedHandle = FWorldDelegates::LevelRemovedFromWorld.AddUObject(this, &UBox3DSubsystem::OnLevelRemovedFromWorld);
+			for (ULevel* Level : InWorld.GetLevels())
+			{
+				RegisterLevelStaticGeometry(Level);
+			}
+		}
 	}
 	else
 	{
@@ -40,6 +57,17 @@ void UBox3DSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 
 void UBox3DSubsystem::Deinitialize()
 {
+	if (LevelAddedHandle.IsValid())
+	{
+		FWorldDelegates::LevelAddedToWorld.Remove(LevelAddedHandle);
+		LevelAddedHandle.Reset();
+	}
+	if (LevelRemovedHandle.IsValid())
+	{
+		FWorldDelegates::LevelRemovedFromWorld.Remove(LevelRemovedHandle);
+		LevelRemovedHandle.Reset();
+	}
+
 	DestroyBox3DWorld();
 	Super::Deinitialize();
 }
@@ -78,12 +106,153 @@ void UBox3DSubsystem::DestroyBox3DWorld()
 
 	if (bWorldValid)
 	{
-		b3DestroyWorld(WorldId);
+		b3DestroyWorld(WorldId); // destroys every body, including bulk static ones
 	}
+
+	// Bulk tri-mesh data are separate allocations the (now destroyed) shapes referenced;
+	// free them after the world so nothing dangles.
+	for (TPair<TWeakObjectPtr<ULevel>, FBulkStaticLevel>& Pair : BulkStaticLevels)
+	{
+		for (b3MeshData* Mesh : Pair.Value.Meshes)
+		{
+			if (Mesh != nullptr)
+			{
+				b3DestroyMesh(Mesh);
+			}
+		}
+	}
+	BulkStaticLevels.Reset();
 
 	WorldId = b3_nullWorldId;
 	bWorldValid = false;
 	Accumulator = 0.0;
+}
+
+void UBox3DSubsystem::OnLevelAddedToWorld(ULevel* Level, UWorld* World)
+{
+	// FWorldDelegates are global; only mirror levels belonging to our world.
+	if (World == GetWorld())
+	{
+		RegisterLevelStaticGeometry(Level);
+	}
+}
+
+void UBox3DSubsystem::OnLevelRemovedFromWorld(ULevel* Level, UWorld* World)
+{
+	if (World == GetWorld())
+	{
+		UnregisterLevelStaticGeometry(Level);
+	}
+}
+
+void UBox3DSubsystem::RegisterLevelStaticGeometry(ULevel* Level)
+{
+	if (!bWorldValid || Level == nullptr || StaticGeometryTag.IsNone() || BulkStaticLevels.Contains(Level))
+	{
+		return;
+	}
+
+	TArray<AActor*> Tagged;
+	for (AActor* Actor : Level->Actors)
+	{
+		if (Actor != nullptr && Actor->ActorHasTag(StaticGeometryTag))
+		{
+			Tagged.Add(Actor);
+		}
+	}
+	if (Tagged.Num() == 0)
+	{
+		return;
+	}
+
+	// Deterministic creation order: streaming completion order is not stable, but body
+	// creation order affects island assignment / reproducibility (doc §8). Sort by the
+	// stable full path name.
+	Tagged.Sort([](const AActor& A, const AActor& B) { return A.GetPathName() < B.GetPathName(); });
+
+	FBulkStaticLevel Bulk;
+	for (AActor* Actor : Tagged)
+	{
+		CreateBulkStaticBody(Actor, Bulk);
+	}
+
+	if (Bulk.Bodies.Num() > 0)
+	{
+		UE_LOG(LogBox3D, Log, TEXT("box3d: bulk-registered %d static bodies from level '%s' (tag '%s')."),
+			Bulk.Bodies.Num(), *GetNameSafe(Level), *StaticGeometryTag.ToString());
+		BulkStaticLevels.Add(Level, MoveTemp(Bulk));
+	}
+	else
+	{
+		// Every actor extracted nothing; drop any meshes a partial attempt allocated.
+		for (b3MeshData* Mesh : Bulk.Meshes)
+		{
+			if (Mesh != nullptr)
+			{
+				b3DestroyMesh(Mesh);
+			}
+		}
+	}
+}
+
+void UBox3DSubsystem::UnregisterLevelStaticGeometry(ULevel* Level)
+{
+	FBulkStaticLevel Bulk;
+	if (!BulkStaticLevels.RemoveAndCopyValue(Level, Bulk))
+	{
+		return;
+	}
+
+	if (bWorldValid)
+	{
+		for (b3BodyId Body : Bulk.Bodies)
+		{
+			if (B3_IS_NON_NULL(Body))
+			{
+				b3DestroyBody(Body);
+			}
+		}
+	}
+	// Meshes were referenced by the shapes we just destroyed; free them after.
+	for (b3MeshData* Mesh : Bulk.Meshes)
+	{
+		if (Mesh != nullptr)
+		{
+			b3DestroyMesh(Mesh);
+		}
+	}
+}
+
+void UBox3DSubsystem::CreateBulkStaticBody(AActor* Actor, FBulkStaticLevel& Bulk)
+{
+	const FTransform Xform = Actor->GetActorTransform();
+
+	b3BodyDef Def = b3DefaultBodyDef();
+	Def.type = b3_staticBody;
+	Def.position = Box3D::ToBox3DPosition(Xform.GetLocation());
+	Def.rotation = Box3D::ToBox3DQuat(Xform.GetRotation());
+
+	b3BodyId Body = b3CreateBody(WorldId, &Def);
+	if (B3_IS_NULL(Body))
+	{
+		return;
+	}
+
+	b3ShapeDef ShapeDef = b3DefaultShapeDef();
+	ShapeDef.baseMaterial.friction = StaticGeometryFriction;
+	ShapeDef.baseMaterial.restitution = StaticGeometryRestitution;
+
+	// Reuse the component path's cooked-collision extraction (scale/handedness/winding
+	// all handled there). Auto = complex tri-mesh if present, else simple primitives.
+	if (Box3D::StaticGeometry::AddStaticShapes(
+			Body, ShapeDef, Actor, Box3D::StaticGeometry::ESource::Auto, /*bInvertWinding=*/false, Bulk.Meshes))
+	{
+		Bulk.Bodies.Add(Body);
+	}
+	else
+	{
+		b3DestroyBody(Body);
+	}
 }
 
 void UBox3DSubsystem::RegisterBody(UBox3DBodyComponent* Component)
@@ -158,14 +327,21 @@ void UBox3DSubsystem::DebugDraw()
 		UE_LOG(LogBox3D, Log, TEXT("box3d.DebugDraw active: drawing bodies at actor pose."));
 	}
 
+	int32 BulkBodyCount = 0;
+	for (const TPair<TWeakObjectPtr<ULevel>, FBulkStaticLevel>& Pair : BulkStaticLevels)
+	{
+		BulkBodyCount += Pair.Value.Bodies.Num();
+	}
+
 	if (GEngine != nullptr)
 	{
 		// AUTH = this world simulates; CLIENT = it only displays replicated poses.
 		const TCHAR* RoleTag = bIsAuthority ? TEXT("AUTH") : TEXT("CLIENT");
 		GEngine->AddOnScreenDebugMessage(
 			static_cast<uint64>(reinterpret_cast<UPTRINT>(this)), 0.0f, FColor::Green,
-			FString::Printf(TEXT("[box3d|%s] %d bodies (%d dynamic) @ %.0f Hz x%d"),
-				RoleTag, AllBodies.Num(), DynamicBodies.Num(), 1.0f / FixedTimeStep, SubStepCount));
+			FString::Printf(TEXT("[box3d|%s] %d bodies (%d dynamic, %d bulk static) @ %.0f Hz x%d"),
+				RoleTag, AllBodies.Num() + BulkBodyCount, DynamicBodies.Num(), BulkBodyCount,
+				1.0f / FixedTimeStep, SubStepCount));
 	}
 
 	for (int32 Index = AllBodies.Num() - 1; Index >= 0; --Index)
@@ -177,6 +353,32 @@ void UBox3DSubsystem::DebugDraw()
 		else
 		{
 			AllBodies.RemoveAtSwap(Index);
+		}
+	}
+
+	// Bulk static bodies have no component to draw themselves, so draw each one's world
+	// AABB here (cyan, the static colour). It's an approximation - the box3d shape is the
+	// actor's cooked collision, not a box - but it confirms a body exists at the right
+	// place and span. Only the authority holds these (clients keep BulkStaticLevels empty).
+	if (UWorld* World = GetWorld())
+	{
+		for (const TPair<TWeakObjectPtr<ULevel>, FBulkStaticLevel>& Pair : BulkStaticLevels)
+		{
+			for (const b3BodyId Body : Pair.Value.Bodies)
+			{
+				if (B3_IS_NULL(Body))
+				{
+					continue;
+				}
+
+				// Convert both corners: the Y-negation swaps min/max on Y, so rebuild the
+				// box from the two converted points rather than assuming lower<upper.
+				const b3AABB Box = b3Body_ComputeAABB(Body);
+				FBox UEBox(ForceInit);
+				UEBox += Box3D::FromBox3DVector(Box.lowerBound);
+				UEBox += Box3D::FromBox3DVector(Box.upperBound);
+				DrawDebugBox(World, UEBox.GetCenter(), UEBox.GetExtent(), FColor::Cyan, false, -1.0f, 0, 1.0f);
+			}
 		}
 	}
 }

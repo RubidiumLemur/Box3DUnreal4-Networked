@@ -7,7 +7,9 @@
 #include <box3d/box3d.h>
 #include "Box3DSubsystem.generated.h"
 
+class AActor;
 class UBox3DBodyComponent;
+class ULevel;
 
 /**
  * Owns the single box3d world for a UWorld and advances it on a fixed timestep.
@@ -17,7 +19,9 @@ class UBox3DBodyComponent;
  * world lifecycle. Dynamic body components register here to be stepped and to have
  * their owning actors driven with render-frame interpolation.
  */
-UCLASS()
+// Config=Game: world-subsystem UPROPERTYs have no details-panel, so the bulk-static
+// settings are read from DefaultGame.ini's [/Script/Box3DUnreal.Box3DSubsystem].
+UCLASS(Config = Game)
 class BOX3DUNREAL_API UBox3DSubsystem : public UTickableWorldSubsystem
 {
 	GENERATED_BODY()
@@ -52,6 +56,13 @@ protected:
 	void StepFixed(float DeltaTime);
 	void DebugDraw();
 
+	// Bulk static geometry: scan streamed levels for tagged actors and mirror their
+	// cooked collision, no per-actor component needed. Opt-in via StaticGeometryTag.
+	void OnLevelAddedToWorld(ULevel* Level, UWorld* World);
+	void OnLevelRemovedFromWorld(ULevel* Level, UWorld* World);
+	void RegisterLevelStaticGeometry(ULevel* Level);
+	void UnregisterLevelStaticGeometry(ULevel* Level);
+
 private:
 	b3WorldId WorldId = b3_nullWorldId;
 	bool bWorldValid = false;
@@ -74,6 +85,20 @@ private:
 	UPROPERTY(EditAnywhere, Category = "Box3D")
 	FVector Gravity = FVector(0.0, 0.0, -980.0);
 
+	/** Actors carrying this tag are bulk-registered as static box3d geometry on level
+	 *  load/stream-in - no per-actor UBox3DBodyComponent needed. None (default) disables
+	 *  the scan; the component-per-actor path stays primary (see doc §8). */
+	UPROPERTY(EditAnywhere, Config, Category = "Box3D|Bulk Static")
+	FName StaticGeometryTag = NAME_None;
+
+	/** Material applied to bulk-registered static bodies (the tagged-actor path has no
+	 *  component to read per-actor material from). */
+	UPROPERTY(EditAnywhere, Config, Category = "Box3D|Bulk Static", meta = (ClampMin = "0.0"))
+	float StaticGeometryFriction = 0.6f;
+
+	UPROPERTY(EditAnywhere, Config, Category = "Box3D|Bulk Static", meta = (ClampMin = "0.0"))
+	float StaticGeometryRestitution = 0.0f;
+
 	/** Dynamic bodies driven each frame. Weak so a destroyed actor drops out safely. */
 	TArray<TWeakObjectPtr<UBox3DBodyComponent>> DynamicBodies;
 
@@ -82,4 +107,18 @@ private:
 
 	/** Every registered body (all types), used only for debug draw. */
 	TArray<TWeakObjectPtr<UBox3DBodyComponent>> AllBodies;
+
+	/** box3d resources for one level's bulk-registered static geometry. Not UPROPERTYs -
+	 *  these are raw box3d handles this subsystem owns and destroys explicitly. */
+	struct FBulkStaticLevel
+	{
+		TArray<b3BodyId> Bodies;
+		TArray<b3MeshData*> Meshes; // tri-mesh data the shapes reference; freed after bodies
+	};
+
+	void CreateBulkStaticBody(AActor* Actor, FBulkStaticLevel& Bulk);
+
+	TMap<TWeakObjectPtr<ULevel>, FBulkStaticLevel> BulkStaticLevels;
+	FDelegateHandle LevelAddedHandle;
+	FDelegateHandle LevelRemovedHandle;
 };
