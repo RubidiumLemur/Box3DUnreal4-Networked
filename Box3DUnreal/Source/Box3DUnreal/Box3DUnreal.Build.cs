@@ -10,7 +10,8 @@ public class Box3DUnreal : ModuleRules
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 
 		PublicDependencyModuleNames.AddRange(new[] { "Core" });
-		PrivateDependencyModuleNames.AddRange(new[] { "CoreUObject", "Engine" });
+		// PhysicsCore: FTriMeshCollisionData / FTriIndices for static tri-mesh extraction.
+		PrivateDependencyModuleNames.AddRange(new[] { "CoreUObject", "Engine", "PhysicsCore" });
 
 		// ThirdParty/ holds the wrapper CMakeLists.txt and the box3d submodule.
 		string ThirdPartyPath = Path.GetFullPath(Path.Combine(ModuleDirectory, "..", "..", "ThirdParty"));

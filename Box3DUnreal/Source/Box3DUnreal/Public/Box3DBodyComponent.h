@@ -26,6 +26,15 @@ enum class EBox3DShape : uint8
 	Capsule
 };
 
+// Which cooked collision a Static body mirrors. UENUM mirror of StaticGeometry::ESource.
+UENUM(BlueprintType)
+enum class EBox3DStaticSource : uint8
+{
+	Auto,             // Complex tri-mesh if present, else simple.
+	SimpleCollision,  // AggGeom convex/box/sphere/capsule.
+	ComplexCollision  // Cooked tri-mesh (meshes & landscape).
+};
+
 /**
  * Add to any actor to give it a box3d rigid body. On BeginPlay it creates the body
  * at the actor's transform and, for Dynamic bodies, registers with UBox3DSubsystem
@@ -72,6 +81,16 @@ public:
 		EditCondition = "Shape == EBox3DShape::Capsule", EditConditionHides))
 	float HalfHeight = 50.0f;
 
+	/** Static bodies only: which cooked collision to mirror. */
+	UPROPERTY(EditAnywhere, Category = "Box3D|Static",
+		meta = (EditCondition = "BodyType == EBox3DBodyType::Static", EditConditionHides))
+	EBox3DStaticSource StaticSource = EBox3DStaticSource::Auto;
+
+	/** Flip if dynamics fall through this mesh (one-sided triangles wound the wrong way). */
+	UPROPERTY(EditAnywhere, Category = "Box3D|Static",
+		meta = (EditCondition = "BodyType == EBox3DBodyType::Static", EditConditionHides))
+	bool bInvertMeshWinding = false;
+
 	/** Density in kg/m^3 (water ~= 1000). */
 	UPROPERTY(EditAnywhere, Category = "Box3D|Material", meta = (ClampMin = "0.0"))
 	float Density = 1000.0f;
@@ -104,6 +123,9 @@ private:
 
 	/** box3d carries no scale, so we preserve the spawn scale when writing back. */
 	FVector SpawnScale = FVector::OneVector;
+
+	/** Tri-mesh data referenced (not cloned) by static shapes; freed after the body. */
+	TArray<b3MeshData*> OwnedMeshes;
 
 	/** Resolved box half-extents (cm) used for Auto/Box shapes; for debug draw. */
 	FVector ResolvedHalfExtent = FVector(50.0, 50.0, 50.0);

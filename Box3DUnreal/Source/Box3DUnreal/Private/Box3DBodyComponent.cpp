@@ -3,6 +3,7 @@
 #include "Box3DBodyComponent.h"
 #include "Box3DSubsystem.h"
 #include "Box3DConversion.h"
+#include "Box3DStaticGeometry.h"
 #include "Box3DLog.h"
 #include "Components/PrimitiveComponent.h"
 #include "DrawDebugHelpers.h"
@@ -77,11 +78,8 @@ void UBox3DBodyComponent::EnableReplication()
 		return; // single-player: nothing to replicate
 	}
 
-	// Actor replication is an Actor-level flag - there is no component checkbox for
-	// it. We are on the authority here (EnableReplication is only reached after the
-	// HasAuthority gate in BeginPlay), so enable it ourselves if the actor author
-	// hasn't, then let UE stream the box3d-driven transform to clients. Clients move
-	// the actor via ReplicatedMovement without simulating locally.
+	// Replication is an actor-level flag (no component checkbox). We're on the authority
+	// here, so enable it if the author didn't, then let UE stream the transform to clients.
 	if (!Owner->GetIsReplicated())
 	{
 		Owner->SetReplicates(true);
@@ -132,6 +130,17 @@ void UBox3DBodyComponent::AddShape()
 	ShapeDef.baseMaterial.friction = Friction;
 	ShapeDef.baseMaterial.restitution = Restitution;
 
+	// Static bodies mirror the actor's cooked collision; fall through to a primitive
+	// Shape only if extraction finds nothing.
+	if (BodyType == EBox3DBodyType::Static)
+	{
+		const auto Source = static_cast<Box3D::StaticGeometry::ESource>(StaticSource);
+		if (Box3D::StaticGeometry::AddStaticShapes(BodyId, ShapeDef, GetOwner(), Source, bInvertMeshWinding, OwnedMeshes))
+		{
+			return;
+		}
+	}
+
 	const float M = static_cast<float>(Box3D::UnrealToMeters);
 
 	switch (Shape)
@@ -176,6 +185,16 @@ void UBox3DBodyComponent::DestroyBody()
 		b3DestroyBody(BodyId);
 	}
 	BodyId = b3_nullBodyId;
+
+	// Free tri-mesh data after the body: its mesh shapes referenced this memory.
+	for (b3MeshData* Mesh : OwnedMeshes)
+	{
+		if (Mesh != nullptr)
+		{
+			b3DestroyMesh(Mesh);
+		}
+	}
+	OwnedMeshes.Reset();
 }
 
 void UBox3DBodyComponent::EnforceAuthorityContract()
