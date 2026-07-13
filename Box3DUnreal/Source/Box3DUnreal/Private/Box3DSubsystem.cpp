@@ -73,6 +73,7 @@ void UBox3DSubsystem::DestroyBox3DWorld()
 {
 	// Bodies are owned/destroyed by their components; just drop our references.
 	DynamicBodies.Reset();
+	KinematicBodies.Reset();
 	AllBodies.Reset();
 
 	if (bWorldValid)
@@ -101,9 +102,18 @@ void UBox3DSubsystem::RegisterDynamicBody(UBox3DBodyComponent* Component)
 	}
 }
 
+void UBox3DSubsystem::RegisterKinematicBody(UBox3DBodyComponent* Component)
+{
+	if (Component != nullptr)
+	{
+		KinematicBodies.AddUnique(Component);
+	}
+}
+
 void UBox3DSubsystem::UnregisterBody(UBox3DBodyComponent* Component)
 {
 	DynamicBodies.RemoveSingleSwap(Component);
+	KinematicBodies.RemoveSingleSwap(Component);
 	AllBodies.RemoveSingleSwap(Component);
 }
 
@@ -179,6 +189,20 @@ void UBox3DSubsystem::StepFixed(float DeltaTime)
 
 	while (Accumulator >= FixedTimeStep)
 	{
+		// Drive kinematic bodies from their (gameplay-moved) actor transform so they
+		// carry resting dynamics.
+		for (int32 Index = KinematicBodies.Num() - 1; Index >= 0; --Index)
+		{
+			if (UBox3DBodyComponent* Body = KinematicBodies[Index].Get())
+			{
+				Body->PushKinematicTarget(FixedTimeStep);
+			}
+			else
+			{
+				KinematicBodies.RemoveAtSwap(Index);
+			}
+		}
+
 		b3World_Step(WorldId, FixedTimeStep, SubStepCount);
 		Accumulator -= FixedTimeStep;
 

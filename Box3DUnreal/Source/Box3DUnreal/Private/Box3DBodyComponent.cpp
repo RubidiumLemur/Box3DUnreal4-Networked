@@ -40,18 +40,26 @@ void UBox3DBodyComponent::BeginPlay()
 	// Register for debug draw in every world (server and client).
 	Subsystem->RegisterBody(this);
 
-	// Only the network authority simulates. A replicated actor on a client is a
-	// SimulatedProxy (HasAuthority()==false) and must NOT create a local body, or it
-	// would fight the server's replicated movement (client sim moves the actor while
-	// replication yanks it back to the authoritative pose). HasAuthority() is the
-	// reliable per-actor gate; the world NetMode can still read Standalone during a
-	// PIE client's OnWorldBeginPlay. In Standalone every actor is authority.
+	// Only the authority simulates; a client displays replicated poses. HasAuthority() is
+	// the per-actor gate, but it only tells server from client when the actor is
+	// REPLICATED - a non-replicated actor reports authority on every instance, so each
+	// would run its own (diverging) body. The explicit NM_Client block catches pure
+	// clients regardless; the warning below flags the remaining hole (level actors).
 	AActor* Owner = GetOwner();
-	if (!Subsystem->IsWorldValid() || Owner == nullptr || !Owner->HasAuthority())
+	const ENetMode NetMode = GetWorld()->GetNetMode();
+	if (!Subsystem->IsWorldValid() || Owner == nullptr || NetMode == NM_Client || !Owner->HasAuthority())
 	{
-		// Client / non-authority: no local body. The actor follows replicated
-		// movement; debug draw still shows it via the registration above.
 		return;
+	}
+
+	// Level-placed actors can't be fixed by runtime SetReplicates - the client instance
+	// already began play as authority and will simulate a duplicate. Must be set in editor.
+	if (NetMode != NM_Standalone && Owner->IsNetStartupActor() && !Owner->GetIsReplicated())
+	{
+		UE_LOG(LogBox3D, Warning,
+			TEXT("%s: level-placed body actor is not replicated; the client will simulate a duplicate, ")
+			TEXT("out-of-sync body. Enable 'Replicates' on the actor in the editor."),
+			*GetNameSafe(Owner));
 	}
 
 	CreateBody();
@@ -62,11 +70,23 @@ void UBox3DBodyComponent::BeginPlay()
 
 	AddShape();
 
-	if (BodyType == EBox3DBodyType::Dynamic)
+	// Dynamic and kinematic both move at runtime and must stream to clients. The
+	// authority contract (Chaos off, Movable) matters for BOTH: with Chaos simulating,
+	// SetReplicateMovement flips into physics-state replication, which expects the client
+	// to simulate - so the client, which never does, would never follow the server.
+	if (BodyType == EBox3DBodyType::Dynamic || BodyType == EBox3DBodyType::Kinematic)
 	{
 		EnforceAuthorityContract();
-		Subsystem->RegisterDynamicBody(this); // dynamic only, for step sync
-		EnableReplication();                  // stream the server transform to clients
+		EnableReplication();
+
+		if (BodyType == EBox3DBodyType::Dynamic)
+		{
+			Subsystem->RegisterDynamicBody(this);   // box3d writes the actor each step
+		}
+		else
+		{
+			Subsystem->RegisterKinematicBody(this); // gameplay pose pushed in each step
+		}
 	}
 }
 
@@ -129,6 +149,23 @@ void UBox3DBodyComponent::AddShape()
 	ShapeDef.density = Density;
 	ShapeDef.baseMaterial.friction = Friction;
 	ShapeDef.baseMaterial.restitution = Restitution;
+	ShapeDef.baseMaterial.rollingResistance = RollingResistance;
+
+	// Opt-in collision filtering; 0/0/0 leaves the default (collide with everything).
+	if (CollisionCategory != 0 || CollisionMask != 0 || CollisionGroup != 0)
+	{
+		b3Filter Filter = b3DefaultFilter();
+		if (CollisionCategory != 0)
+		{
+			Filter.categoryBits = static_cast<uint64>(static_cast<uint32>(CollisionCategory));
+		}
+		if (CollisionMask != 0)
+		{
+			Filter.maskBits = static_cast<uint64>(static_cast<uint32>(CollisionMask));
+		}
+		Filter.groupIndex = CollisionGroup;
+		ShapeDef.filter = Filter;
+	}
 
 	// Static bodies mirror the actor's cooked collision; fall through to a primitive
 	// Shape only if extraction finds nothing.
@@ -211,7 +248,7 @@ void UBox3DBodyComponent::EnforceAuthorityContract()
 	if (Root->Mobility != EComponentMobility::Movable)
 	{
 		UE_LOG(LogBox3D, Warning,
-			TEXT("%s: root is not Movable; box3d cannot drive its transform. Set Mobility to Movable."),
+			TEXT("%s: root is not Movable; its transform can't change at runtime. Set Mobility to Movable."),
 			*GetNameSafe(GetOwner()));
 	}
 }
@@ -261,6 +298,22 @@ void UBox3DBodyComponent::ApplyInterpolatedTransform(float Alpha)
 	Rotation.Normalize();
 
 	GetOwner()->SetActorLocationAndRotation(Location, Rotation, /*bSweep=*/false, nullptr, ETeleportType::TeleportPhysics);
+}
+
+void UBox3DBodyComponent::PushKinematicTarget(float TimeStep)
+{
+	if (B3_IS_NULL(BodyId))
+	{
+		return;
+	}
+
+	// Gameplay owns the actor pose; set the velocity that reaches it so contacts carry
+	// resting dynamics (a raw SetTransform teleport imparts no momentum).
+	const FTransform T = GetOwner()->GetActorTransform();
+	b3WorldTransform Target;
+	Target.p = Box3D::ToBox3DPosition(T.GetLocation());
+	Target.q = Box3D::ToBox3DQuat(T.GetRotation());
+	b3Body_SetTargetTransform(BodyId, Target, TimeStep, /*wake=*/true);
 }
 
 void UBox3DBodyComponent::DrawDebug() const

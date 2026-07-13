@@ -57,6 +57,8 @@ public:
 	void CaptureStepTransform();
 	/** Subsystem hook: write Lerp(prev, curr, Alpha) to the owning actor. */
 	void ApplyInterpolatedTransform(float Alpha);
+	/** Subsystem hook: set the kinematic velocity to reach the actor pose in TimeStep. */
+	void PushKinematicTarget(float TimeStep);
 	/** Subsystem hook: draw this body's shape at the owning actor's current pose. */
 	void DrawDebug() const;
 
@@ -101,11 +103,27 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Box3D|Material", meta = (ClampMin = "0.0"))
 	float Restitution = 0.0f;
 
+	/** Rolling resistance for spheres/capsules (ignored by other shapes). */
+	UPROPERTY(EditAnywhere, Category = "Box3D|Material", meta = (ClampMin = "0.0"))
+	float RollingResistance = 0.0f;
+
 	UPROPERTY(EditAnywhere, Category = "Box3D|Damping", meta = (ClampMin = "0.0"))
 	float LinearDamping = 0.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Box3D|Damping", meta = (ClampMin = "0.0"))
 	float AngularDamping = 0.05f;
+
+	/** Category bitmask this body belongs to. 0 = collide with everything. */
+	UPROPERTY(EditAnywhere, Category = "Box3D|Collision", meta = (Bitmask))
+	int32 CollisionCategory = 0;
+
+	/** Categories this body collides with. 0 = collide with everything. */
+	UPROPERTY(EditAnywhere, Category = "Box3D|Collision", meta = (Bitmask))
+	int32 CollisionMask = 0;
+
+	/** box3d group index: >0 always collide, <0 never collide within the group, 0 = off. */
+	UPROPERTY(EditAnywhere, Category = "Box3D|Collision")
+	int32 CollisionGroup = 0;
 
 protected:
 	void CreateBody();

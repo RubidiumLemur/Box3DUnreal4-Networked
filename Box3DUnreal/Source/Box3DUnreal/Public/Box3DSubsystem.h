@@ -43,6 +43,7 @@ public:
 	/** All bodies register for debug draw; dynamic ones also register for sync. */
 	void RegisterBody(UBox3DBodyComponent* Component);
 	void RegisterDynamicBody(UBox3DBodyComponent* Component);
+	void RegisterKinematicBody(UBox3DBodyComponent* Component);
 	void UnregisterBody(UBox3DBodyComponent* Component);
 
 protected:
@@ -75,6 +76,9 @@ private:
 
 	/** Dynamic bodies driven each frame. Weak so a destroyed actor drops out safely. */
 	TArray<TWeakObjectPtr<UBox3DBodyComponent>> DynamicBodies;
+
+	/** Kinematic bodies pushed from their actor transform before each step. */
+	TArray<TWeakObjectPtr<UBox3DBodyComponent>> KinematicBodies;
 
 	/** Every registered body (all types), used only for debug draw. */
 	TArray<TWeakObjectPtr<UBox3DBodyComponent>> AllBodies;
