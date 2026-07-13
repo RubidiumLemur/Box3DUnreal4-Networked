@@ -11,6 +11,14 @@ project(Box3DUnrealThirdParty LANGUAGES C CXX)
 # `box3d` library target.
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 
+# Double precision: translation is stored as double so coordinates stay accurate
+# far from the origin (open-world sim), while rotation stays float. Determinism is
+# preserved (IEEE-754 with no FMA contraction). box3d marks this PUBLIC on its
+# target, but our consumer is UnrealBuildTool, not CMake, so Box3DUnreal.Build.cs
+# defines BOX3D_DOUBLE_PRECISION on the module too. Both MUST agree or box3d's
+# ABI-mismatch link guard (the b3CreateWorld macro) trips on purpose.
+set(BOX3D_DOUBLE_PRECISION ON CACHE BOOL "" FORCE)
+
 add_subdirectory(box3d)
 
 if (MSVC)

@@ -18,6 +18,12 @@ public class Box3DUnreal : ModuleRules
 
 		PublicIncludePaths.Add(Path.Combine(Box3DPath, "include"));
 
+		// Must match the box3d library ABI (ThirdParty/CMakeLists.txt builds box3d
+		// with BOX3D_DOUBLE_PRECISION). This makes b3Pos double and routes
+		// b3CreateWorld to the double-precision entry point in the box3d headers.
+		// A mismatch trips box3d's intentional link-error guard.
+		PublicDefinitions.Add("BOX3D_DOUBLE_PRECISION=1");
+
 		// box3d is always built with the release CRT (/MD). This matches Unreal's
 		// default for every configuration (Unreal only uses the debug CRT when
 		// bDebugBuildsActuallyUseDebugCRT is set), so a single Release build is safe
