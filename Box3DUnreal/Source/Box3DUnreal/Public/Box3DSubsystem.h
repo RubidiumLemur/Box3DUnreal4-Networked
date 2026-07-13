@@ -7,13 +7,15 @@
 #include <box3d/box3d.h>
 #include "Box3DSubsystem.generated.h"
 
+class UBox3DBodyComponent;
+
 /**
  * Owns the single box3d world for a UWorld and advances it on a fixed timestep.
  *
  * One instance exists per Game/PIE world, so editor, each PIE session, and
  * standalone each get an isolated simulation with correct create/destroy on the
- * world lifecycle. Body components (later milestone) register here to be stepped
- * and synced.
+ * world lifecycle. Dynamic body components register here to be stepped and to have
+ * their owning actors driven with render-frame interpolation.
  */
 UCLASS()
 class BOX3DUNREAL_API UBox3DSubsystem : public UTickableWorldSubsystem
@@ -35,18 +37,14 @@ public:
 	b3WorldId GetWorldId() const { return WorldId; }
 	bool IsWorldValid() const { return bWorldValid; }
 
-	/**
-	 * Milestone-1 acceptance check: drop a dynamic 1m box from 5m up and log its
-	 * Z each step. Exercises world + fixed step + gravity direction + conversion
-	 * end to end. Invoked by the "box3d.SelfTest" console command.
-	 */
-	void RunGravitySelfTest();
+	/** Dynamic bodies need per-step capture + per-frame interpolation. */
+	void RegisterDynamicBody(UBox3DBodyComponent* Component);
+	void UnregisterBody(UBox3DBodyComponent* Component);
 
 protected:
 	void CreateBox3DWorld();
 	void DestroyBox3DWorld();
 	void StepFixed(float DeltaTime);
-	void TickSelfTest();
 
 private:
 	b3WorldId WorldId = b3_nullWorldId;
@@ -69,7 +67,6 @@ private:
 	UPROPERTY(EditAnywhere, Category = "Box3D")
 	FVector Gravity = FVector(0.0, 0.0, -980.0);
 
-	// --- self-test state ---
-	b3BodyId TestBodyId = b3_nullBodyId;
-	int32 TestStepsRemaining = 0;
+	/** Dynamic bodies driven each frame. Weak so a destroyed actor drops out safely. */
+	TArray<TWeakObjectPtr<UBox3DBodyComponent>> DynamicBodies;
 };
