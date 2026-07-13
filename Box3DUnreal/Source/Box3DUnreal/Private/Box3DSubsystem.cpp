@@ -109,7 +109,9 @@ void UBox3DSubsystem::UnregisterBody(UBox3DBodyComponent* Component)
 
 bool UBox3DSubsystem::IsTickable() const
 {
-	return bWorldValid;
+	// Authority worlds tick to step; client worlds tick only to debug-draw the
+	// replicated bodies they registered.
+	return bWorldValid || AllBodies.Num() > 0;
 }
 
 TStatId UBox3DSubsystem::GetStatId() const
@@ -121,12 +123,12 @@ void UBox3DSubsystem::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	if (!bWorldValid)
+	// Only authority worlds step; but debug draw runs everywhere so clients can see
+	// their replicated bodies.
+	if (bWorldValid)
 	{
-		return;
+		StepFixed(DeltaTime);
 	}
-
-	StepFixed(DeltaTime);
 
 	if (CVarBox3DDebugDraw.GetValueOnGameThread() != 0)
 	{
@@ -148,10 +150,12 @@ void UBox3DSubsystem::DebugDraw()
 
 	if (GEngine != nullptr)
 	{
+		// AUTH = this world simulates; CLIENT = it only displays replicated poses.
+		const TCHAR* RoleTag = bIsAuthority ? TEXT("AUTH") : TEXT("CLIENT");
 		GEngine->AddOnScreenDebugMessage(
 			static_cast<uint64>(reinterpret_cast<UPTRINT>(this)), 0.0f, FColor::Green,
-			FString::Printf(TEXT("[box3d|actor-pose] %d bodies (%d dynamic) @ %.0f Hz x%d"),
-				AllBodies.Num(), DynamicBodies.Num(), 1.0f / FixedTimeStep, SubStepCount));
+			FString::Printf(TEXT("[box3d|%s] %d bodies (%d dynamic) @ %.0f Hz x%d"),
+				RoleTag, AllBodies.Num(), DynamicBodies.Num(), 1.0f / FixedTimeStep, SubStepCount));
 	}
 
 	for (int32 Index = AllBodies.Num() - 1; Index >= 0; --Index)

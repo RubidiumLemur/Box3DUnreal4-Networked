@@ -20,10 +20,36 @@ void UBox3DBodyComponent::BeginPlay()
 	Super::BeginPlay();
 
 	Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UBox3DSubsystem>() : nullptr;
-	if (Subsystem == nullptr || !Subsystem->IsWorldValid())
+	if (Subsystem == nullptr)
 	{
-		// No simulation in this world (e.g. a network client, where the box3d world
-		// is disabled). The actor follows the server's replicated movement instead.
+		return;
+	}
+
+	// Resolve the box extent now so debug draw works even on clients, which create
+	// no body but still show the replicated actor pose.
+	if (Shape == EBox3DShape::Box)
+	{
+		ResolvedHalfExtent = BoxHalfExtent.GetAbs();
+	}
+	else if (Shape == EBox3DShape::Auto)
+	{
+		ResolvedHalfExtent = ComputeAutoBoxHalfExtent();
+	}
+
+	// Register for debug draw in every world (server and client).
+	Subsystem->RegisterBody(this);
+
+	// Only the network authority simulates. A replicated actor on a client is a
+	// SimulatedProxy (HasAuthority()==false) and must NOT create a local body, or it
+	// would fight the server's replicated movement (client sim moves the actor while
+	// replication yanks it back to the authoritative pose). HasAuthority() is the
+	// reliable per-actor gate; the world NetMode can still read Standalone during a
+	// PIE client's OnWorldBeginPlay. In Standalone every actor is authority.
+	AActor* Owner = GetOwner();
+	if (!Subsystem->IsWorldValid() || Owner == nullptr || !Owner->HasAuthority())
+	{
+		// Client / non-authority: no local body. The actor follows replicated
+		// movement; debug draw still shows it via the registration above.
 		return;
 	}
 
@@ -34,8 +60,6 @@ void UBox3DBodyComponent::BeginPlay()
 	}
 
 	AddShape();
-
-	Subsystem->RegisterBody(this); // all types, for debug draw
 
 	if (BodyType == EBox3DBodyType::Dynamic)
 	{
@@ -53,18 +77,20 @@ void UBox3DBodyComponent::EnableReplication()
 		return; // single-player: nothing to replicate
 	}
 
-	if (Owner->GetIsReplicated())
+	// Actor replication is an Actor-level flag - there is no component checkbox for
+	// it. We are on the authority here (EnableReplication is only reached after the
+	// HasAuthority gate in BeginPlay), so enable it ourselves if the actor author
+	// hasn't, then let UE stream the box3d-driven transform to clients. Clients move
+	// the actor via ReplicatedMovement without simulating locally.
+	if (!Owner->GetIsReplicated())
 	{
-		// box3d drives the transform on the server; let UE replicate it to clients,
-		// which move the actor via ReplicatedMovement without simulating locally.
-		Owner->SetReplicateMovement(true);
-	}
-	else
-	{
-		UE_LOG(LogBox3D, Warning,
-			TEXT("%s: actor is not replicated; clients will not see box3d movement. Enable 'Replicates' and 'Replicate Movement' on the actor."),
+		Owner->SetReplicates(true);
+		UE_LOG(LogBox3D, Log,
+			TEXT("%s: enabling actor replication so clients receive box3d movement."),
 			*GetNameSafe(Owner));
 	}
+
+	Owner->SetReplicateMovement(true);
 }
 
 void UBox3DBodyComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -132,8 +158,7 @@ void UBox3DBodyComponent::AddShape()
 	}
 	default: // Auto / Box
 	{
-		const FVector HalfExtent = (Shape == EBox3DShape::Box) ? BoxHalfExtent : ComputeAutoBoxHalfExtent();
-		ResolvedHalfExtent = HalfExtent.GetAbs();
+		// ResolvedHalfExtent was computed in BeginPlay (also used by debug draw).
 		const b3BoxHull Hull = b3MakeBoxHull(
 			ResolvedHalfExtent.X * M, ResolvedHalfExtent.Y * M, ResolvedHalfExtent.Z * M);
 		b3CreateHullShape(BodyId, &ShapeDef, &Hull.base);
@@ -223,14 +248,14 @@ void UBox3DBodyComponent::DrawDebug() const
 {
 	UWorld* World = GetWorld();
 	AActor* Owner = GetOwner();
-	if (World == nullptr || Owner == nullptr || B3_IS_NULL(BodyId))
+	if (World == nullptr || Owner == nullptr)
 	{
 		return;
 	}
 
-	// Draw at the owning actor's exact current transform. Since box3d already wrote
-	// that transform to the actor this frame, the wireframe is guaranteed to sit on
-	// the mesh - it cannot lead or lag it.
+	// Draw at the owning actor's exact current transform. On the server box3d wrote
+	// it this frame; on a client it is the replicated pose. Either way the wireframe
+	// sits on the mesh - and a client box that moves proves replication is working.
 	const FTransform T = Owner->GetActorTransform();
 	const FVector Location = T.GetLocation();
 	const FQuat Rotation = T.GetRotation();
