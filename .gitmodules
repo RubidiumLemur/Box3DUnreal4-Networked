@@ -1,0 +1,3 @@
+[submodule "Box3DUnreal/ThirdParty/box3d"]
+	path = Box3DUnreal/ThirdParty/box3d
+	url = https://github.com/erincatto/box3d.git
