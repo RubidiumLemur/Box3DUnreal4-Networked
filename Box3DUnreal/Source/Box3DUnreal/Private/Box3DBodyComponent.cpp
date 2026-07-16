@@ -9,6 +9,69 @@
 #include "DrawDebugHelpers.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "PhysicsEngine/AggregateGeom.h"
+#include "PhysicsEngine/BodySetup.h"
+#include "PhysicsEngine/ConvexElem.h"
+
+namespace
+{
+	// Cap the hull vertex count, matching the static-geometry path.
+	constexpr int32 ConvexMaxHullVertices = 64;
+
+	// Local vertex (cm) -> box3d point (m): bake scale, negate Y (see Box3DConversion.h).
+	FORCEINLINE b3Vec3 ConvexLocalToBox3D(const FVector& V, const FVector& Scale)
+	{
+		return b3Vec3{
+			static_cast<float>(V.X * Scale.X * Box3D::UnrealToMeters),
+			static_cast<float>(-V.Y * Scale.Y * Box3D::UnrealToMeters),
+			static_cast<float>(V.Z * Scale.Z * Box3D::UnrealToMeters) };
+	}
+
+	// Gather the mesh's simple convex/box collision as box3d-space point clouds, one per
+	// element. Scale is baked in (box3d shapes carry none). Convex hulls from render verts
+	// are wrong; this uses the cooked simple collision (doc §7).
+	void GatherConvexPointClouds(UPrimitiveComponent* Prim, const FVector& Scale, TArray<TArray<b3Vec3>>& OutClouds)
+	{
+		UBodySetup* Setup = Prim ? Prim->GetBodySetup() : nullptr;
+		if (Setup == nullptr)
+		{
+			return;
+		}
+
+		const FKAggregateGeom& Agg = Setup->AggGeom;
+
+		// Convex: element transform places local verts into body space.
+		for (const FKConvexElem& Convex : Agg.ConvexElems)
+		{
+			if (Convex.VertexData.Num() < 4)
+			{
+				continue;
+			}
+			const FTransform ElemTM = Convex.GetTransform();
+			TArray<b3Vec3>& Cloud = OutClouds.AddDefaulted_GetRef();
+			Cloud.Reserve(Convex.VertexData.Num());
+			for (const FVector& V : Convex.VertexData)
+			{
+				Cloud.Add(ConvexLocalToBox3D(ElemTM.TransformPosition(V), Scale));
+			}
+		}
+
+		// Boxes: 8 corners into a hull (box simple collision, e.g. the default).
+		for (const FKBoxElem& Box : Agg.BoxElems)
+		{
+			const FTransform ElemTM(Box.Rotation, Box.Center);
+			const FVector He(Box.X * 0.5f, Box.Y * 0.5f, Box.Z * 0.5f);
+			TArray<b3Vec3>& Cloud = OutClouds.AddDefaulted_GetRef();
+			Cloud.Reserve(8);
+			for (int32 Sx = -1; Sx <= 1; Sx += 2)
+			for (int32 Sy = -1; Sy <= 1; Sy += 2)
+			for (int32 Sz = -1; Sz <= 1; Sz += 2)
+			{
+				Cloud.Add(ConvexLocalToBox3D(ElemTM.TransformPosition(FVector(Sx * He.X, Sy * He.Y, Sz * He.Z)), Scale));
+			}
+		}
+	}
+} // namespace
 
 UBox3DBodyComponent::UBox3DBodyComponent()
 {
@@ -27,19 +90,40 @@ void UBox3DBodyComponent::BeginPlay()
 	}
 
 	// Resolve the box extent now so debug draw works even on clients, which create
-	// no body but still show the replicated actor pose.
+	// no body but still show the replicated actor pose. Convex resolves it too as the
+	// fallback box used when the mesh has no simple convex collision.
 	if (Shape == EBox3DShape::Box)
 	{
 		ResolvedHalfExtent = BoxHalfExtent.GetAbs();
 	}
-	else if (Shape == EBox3DShape::Auto)
+	else if (Shape == EBox3DShape::Auto || Shape == EBox3DShape::Convex)
 	{
 		ResolvedHalfExtent = ComputeAutoBoxHalfExtent();
+	}
+
+	// Cache the convex wireframe on both server and client so both can draw the shape.
+	if (Shape == EBox3DShape::Convex)
+	{
+		BuildConvexDebugGeometry();
 	}
 
 	// Register for debug draw in every world (server and client).
 	Subsystem->RegisterBody(this);
 
+	// Resolve net-role eligibility once. It doesn't depend on the master switch or world
+	// validity, so a runtime 'box3d.Enabled 1' can still build this body later.
+	bSimulationEligible = ComputeSimulationEligibility();
+
+	// Build the body now unless box3d is globally disabled; if it is, the subsystem
+	// rebuilds every eligible body when the switch is turned back on.
+	if (bSimulationEligible && UBox3DSubsystem::IsBox3DEnabled())
+	{
+		RebuildSimulationBody();
+	}
+}
+
+bool UBox3DBodyComponent::ComputeSimulationEligibility()
+{
 	// Only the authority simulates; a client displays replicated poses. HasAuthority() is
 	// the per-actor gate, but it only tells server from client when the actor is
 	// REPLICATED - a non-replicated actor reports authority on every instance, so each
@@ -47,9 +131,9 @@ void UBox3DBodyComponent::BeginPlay()
 	// clients regardless; the warning below flags the remaining hole (level actors).
 	AActor* Owner = GetOwner();
 	const ENetMode NetMode = GetWorld()->GetNetMode();
-	if (!Subsystem->IsWorldValid() || Owner == nullptr || NetMode == NM_Client || !Owner->HasAuthority())
+	if (Owner == nullptr || NetMode == NM_Client || !Owner->HasAuthority())
 	{
-		return;
+		return false;
 	}
 
 	// Level-placed actors can't be fixed by runtime SetReplicates - the client instance
@@ -60,6 +144,18 @@ void UBox3DBodyComponent::BeginPlay()
 			TEXT("%s: level-placed body actor is not replicated; the client will simulate a duplicate, ")
 			TEXT("out-of-sync body. Enable 'Replicates' on the actor in the editor."),
 			*GetNameSafe(Owner));
+	}
+
+	return true;
+}
+
+void UBox3DBodyComponent::RebuildSimulationBody()
+{
+	// Idempotent: skip if a body already exists, the role is ineligible, or the world
+	// isn't up (e.g. box3d still disabled). The subsystem calls this on a runtime enable.
+	if (B3_IS_NON_NULL(BodyId) || !bSimulationEligible || Subsystem == nullptr || !Subsystem->IsWorldValid())
+	{
+		return;
 	}
 
 	CreateBody();
@@ -88,6 +184,25 @@ void UBox3DBodyComponent::BeginPlay()
 			Subsystem->RegisterKinematicBody(this); // gameplay pose pushed in each step
 		}
 	}
+}
+
+void UBox3DBodyComponent::TeardownSimulationBody()
+{
+	// Hand the actor back to its native Chaos physics so a runtime disable is a true
+	// "without box3d", not a frozen pose. Only actors box3d actually took over (dynamic/
+	// kinematic, and only those that were simulating) get restored.
+	if (bRestoreChaosSimulation)
+	{
+		if (UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(GetOwner()->GetRootComponent()))
+		{
+			Root->SetSimulatePhysics(true);
+		}
+		bRestoreChaosSimulation = false;
+	}
+
+	// Destroy the box3d body but stay registered (subsystem keeps us in AllBodies) so a
+	// later 'box3d.Enabled 1' rebuilds. DestroyBody nulls BodyId and frees owned meshes.
+	DestroyBody();
 }
 
 void UBox3DBodyComponent::EnableReplication()
@@ -202,6 +317,21 @@ void UBox3DBodyComponent::AddShape()
 		b3CreateCapsuleShape(BodyId, &ShapeDef, &Capsule);
 		break;
 	}
+	case EBox3DShape::Convex:
+	{
+		if (AddConvexShapes(ShapeDef))
+		{
+			break;
+		}
+		UE_LOG(LogBox3D, Warning,
+			TEXT("%s: Convex shape found no simple convex collision; falling back to a box. ")
+			TEXT("Add convex simple collision to the mesh, or use a different shape."),
+			*GetNameSafe(GetOwner()));
+		const b3BoxHull FallbackHull = b3MakeBoxHull(
+			ResolvedHalfExtent.X * M, ResolvedHalfExtent.Y * M, ResolvedHalfExtent.Z * M);
+		b3CreateHullShape(BodyId, &ShapeDef, &FallbackHull.base);
+		break;
+	}
 	default: // Auto / Box
 	{
 		// ResolvedHalfExtent was computed in BeginPlay (also used by debug draw).
@@ -210,6 +340,85 @@ void UBox3DBodyComponent::AddShape()
 		b3CreateHullShape(BodyId, &ShapeDef, &Hull.base);
 		break;
 	}
+	}
+}
+
+bool UBox3DBodyComponent::AddConvexShapes(const b3ShapeDef& ShapeDef)
+{
+	UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(GetOwner()->GetRootComponent());
+	if (Prim == nullptr)
+	{
+		return false;
+	}
+
+	TArray<TArray<b3Vec3>> Clouds;
+	GatherConvexPointClouds(Prim, Prim->GetComponentScale(), Clouds);
+
+	// One hull shape per element (a compound), matching the mesh's simple collision.
+	int32 Created = 0;
+	for (const TArray<b3Vec3>& Cloud : Clouds)
+	{
+		if (Cloud.Num() < 4)
+		{
+			continue;
+		}
+		b3HullData* Hull = b3CreateHull(Cloud.GetData(), Cloud.Num(), ConvexMaxHullVertices);
+		if (Hull == nullptr)
+		{
+			continue;
+		}
+		b3CreateHullShape(BodyId, &ShapeDef, Hull); // box3d clones the hull; free ours after
+		b3DestroyHull(Hull);
+		++Created;
+	}
+
+	return Created > 0;
+}
+
+void UBox3DBodyComponent::BuildConvexDebugGeometry()
+{
+	ConvexDebugSegments.Reset();
+
+	UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(GetOwner()->GetRootComponent());
+	if (Prim == nullptr)
+	{
+		return;
+	}
+
+	TArray<TArray<b3Vec3>> Clouds;
+	GatherConvexPointClouds(Prim, Prim->GetComponentScale(), Clouds);
+
+	// Rebuild each hull just to read back its computed edges - b3CreateHull is a standalone
+	// utility (no world), so this runs on clients too. Emit each undirected edge once by
+	// only taking the half-edge whose index is below its twin.
+	for (const TArray<b3Vec3>& Cloud : Clouds)
+	{
+		if (Cloud.Num() < 4)
+		{
+			continue;
+		}
+		b3HullData* Hull = b3CreateHull(Cloud.GetData(), Cloud.Num(), ConvexMaxHullVertices);
+		if (Hull == nullptr)
+		{
+			continue;
+		}
+
+		const b3Vec3* Points = b3GetHullPoints(Hull);
+		const b3HullHalfEdge* Edges = b3GetHullEdges(Hull);
+		if (Points != nullptr && Edges != nullptr)
+		{
+			for (int32 E = 0; E < Hull->edgeCount; ++E)
+			{
+				if (E < Edges[E].twin)
+				{
+					// Points carry the baked scale; convert back to local Unreal cm.
+					ConvexDebugSegments.Add(Box3D::FromBox3DVector(Points[Edges[E].origin]));
+					ConvexDebugSegments.Add(Box3D::FromBox3DVector(Points[Edges[Edges[E].twin].origin]));
+				}
+			}
+		}
+
+		b3DestroyHull(Hull);
 	}
 }
 
@@ -242,7 +451,9 @@ void UBox3DBodyComponent::EnforceAuthorityContract()
 		return;
 	}
 
-	// box3d is the sole mover; make sure Chaos isn't also simulating this actor.
+	// box3d is the sole mover; make sure Chaos isn't also simulating this actor. Remember
+	// the prior state so a runtime disable can hand the actor back (see TeardownSimulationBody).
+	bRestoreChaosSimulation = Root->IsSimulatingPhysics();
 	Root->SetSimulatePhysics(false);
 
 	if (Root->Mobility != EComponentMobility::Movable)
@@ -348,6 +559,24 @@ void UBox3DBodyComponent::DrawDebug() const
 		break;
 	case EBox3DShape::Capsule:
 		DrawDebugCapsule(World, Location, HalfHeight + Radius, Radius, Rotation, Color, false, -1.0f, 0, 1.0f);
+		break;
+	case EBox3DShape::Convex:
+		if (ConvexDebugSegments.Num() >= 2)
+		{
+			// Segments are body-local (scale baked); the body carries no scale, so place
+			// them with rotation + translation only.
+			for (int32 i = 0; i + 1 < ConvexDebugSegments.Num(); i += 2)
+			{
+				DrawDebugLine(World,
+					Location + Rotation.RotateVector(ConvexDebugSegments[i]),
+					Location + Rotation.RotateVector(ConvexDebugSegments[i + 1]),
+					Color, false, -1.0f, 0, 1.0f);
+			}
+		}
+		else // no convex collision resolved; the shape fell back to a box
+		{
+			DrawDebugBox(World, Location, ResolvedHalfExtent, Rotation, Color, false, -1.0f, 0, 1.0f);
+		}
 		break;
 	default: // Auto / Box
 		DrawDebugBox(World, Location, ResolvedHalfExtent, Rotation, Color, false, -1.0f, 0, 1.0f);

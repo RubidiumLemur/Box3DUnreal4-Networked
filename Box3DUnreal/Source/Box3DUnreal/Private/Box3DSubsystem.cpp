@@ -17,6 +17,18 @@ static TAutoConsoleVariable<int32> CVarBox3DDebugDraw(
 	TEXT("Draw box3d dynamic bodies at their actual simulation transform (1 = on)."),
 	ECVF_Cheat);
 
+static TAutoConsoleVariable<int32> CVarBox3DEnabled(
+	TEXT("box3d.Enabled"),
+	1,
+	TEXT("Master switch for the box3d simulation. 1 = on, 0 = off (no world, bodies or static geometry).\n")
+	TEXT("Toggle live in PIE to compare against no-box3d; also forced off at launch by -DisableBox3D."),
+	ECVF_Default);
+
+bool UBox3DSubsystem::IsBox3DEnabled()
+{
+	return CVarBox3DEnabled.GetValueOnGameThread() != 0;
+}
+
 bool UBox3DSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
 	// Simulation only runs in play worlds. Editor preview support can be added later.
@@ -31,32 +43,136 @@ void UBox3DSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	// client leaves its actors to UE's replicated movement, so it never spins up a
 	// second (diverging) world.
 	bIsAuthority = InWorld.GetNetMode() != NM_Client;
-	if (bIsAuthority)
-	{
-		CreateBox3DWorld();
 
-		// Opt-in bulk static path: watch level streaming and scan the already-loaded
-		// levels. Static bodies never move, so only the authority (which simulates)
-		// needs them - clients follow replicated dynamics and create no world.
-		if (bWorldValid && !StaticGeometryTag.IsNone())
+	// Watch box3d.Enabled so it can be toggled live in PIE. The sink fires for any cvar
+	// change; OnEnabledCVarChanged filters to an actual on<->off transition.
+	EnabledSinkHandle = IConsoleManager::Get().RegisterConsoleVariableSink_Handle(
+		FConsoleCommandDelegate::CreateUObject(this, &UBox3DSubsystem::OnEnabledCVarChanged));
+
+	if (!bIsAuthority)
+	{
+		UE_LOG(LogBox3D, Log,
+			TEXT("box3d: client world - simulation disabled; actors follow replicated movement."));
+		return;
+	}
+
+	if (IsBox3DEnabled())
+	{
+		EnableSimulation();
+	}
+	else
+	{
+		UE_LOG(LogBox3D, Log,
+			TEXT("box3d: disabled (box3d.Enabled=0 / -DisableBox3D). Set 'box3d.Enabled 1' to build the simulation."));
+	}
+}
+
+void UBox3DSubsystem::EnableSimulation()
+{
+	CreateBox3DWorld();
+	if (!bWorldValid)
+	{
+		return; // creation failed; stay inactive so a later toggle can retry
+	}
+	bEnabledActive = true;
+
+	// Opt-in bulk static path: watch level streaming and scan the already-loaded
+	// levels. Static bodies never move, so only the authority (which simulates)
+	// needs them - clients follow replicated dynamics and create no world.
+	if (!StaticGeometryTag.IsNone())
+	{
+		LevelAddedHandle = FWorldDelegates::LevelAddedToWorld.AddUObject(this, &UBox3DSubsystem::OnLevelAddedToWorld);
+		LevelRemovedHandle = FWorldDelegates::LevelRemovedFromWorld.AddUObject(this, &UBox3DSubsystem::OnLevelRemovedFromWorld);
+		if (UWorld* World = GetWorld())
 		{
-			LevelAddedHandle = FWorldDelegates::LevelAddedToWorld.AddUObject(this, &UBox3DSubsystem::OnLevelAddedToWorld);
-			LevelRemovedHandle = FWorldDelegates::LevelRemovedFromWorld.AddUObject(this, &UBox3DSubsystem::OnLevelRemovedFromWorld);
-			for (ULevel* Level : InWorld.GetLevels())
+			for (ULevel* Level : World->GetLevels())
 			{
 				RegisterLevelStaticGeometry(Level);
 			}
 		}
 	}
+
+	// Runtime re-enable: components already registered (in their BeginPlay) but with no
+	// body. Build them now. On the initial startup this list is empty - each component
+	// builds itself in BeginPlay - so this is a no-op then.
+	for (int32 Index = AllBodies.Num() - 1; Index >= 0; --Index)
+	{
+		if (UBox3DBodyComponent* Body = AllBodies[Index].Get())
+		{
+			Body->RebuildSimulationBody();
+		}
+		else
+		{
+			AllBodies.RemoveAtSwap(Index);
+		}
+	}
+}
+
+void UBox3DSubsystem::DisableSimulation()
+{
+	// Destroy component-owned bodies while the world is still valid (b3DestroyWorld would
+	// otherwise leave their handles dangling). They stay registered in AllBodies so a
+	// later enable rebuilds them.
+	for (int32 Index = AllBodies.Num() - 1; Index >= 0; --Index)
+	{
+		if (UBox3DBodyComponent* Body = AllBodies[Index].Get())
+		{
+			Body->TeardownSimulationBody();
+		}
+		else
+		{
+			AllBodies.RemoveAtSwap(Index);
+		}
+	}
+	// Step lists are rebuilt on re-enable (the components re-register).
+	DynamicBodies.Reset();
+	KinematicBodies.Reset();
+
+	if (LevelAddedHandle.IsValid())
+	{
+		FWorldDelegates::LevelAddedToWorld.Remove(LevelAddedHandle);
+		LevelAddedHandle.Reset();
+	}
+	if (LevelRemovedHandle.IsValid())
+	{
+		FWorldDelegates::LevelRemovedFromWorld.Remove(LevelRemovedHandle);
+		LevelRemovedHandle.Reset();
+	}
+
+	DestroyBox3DWorld(); // also destroys bulk static bodies/meshes
+	bEnabledActive = false;
+
+	UE_LOG(LogBox3D, Log, TEXT("box3d: simulation torn down (box3d.Enabled=0)."));
+}
+
+void UBox3DSubsystem::OnEnabledCVarChanged()
+{
+	// Only the authority builds a world; clients never simulate regardless of the switch.
+	if (!bIsAuthority)
+	{
+		return;
+	}
+
+	const bool bWantEnabled = IsBox3DEnabled();
+	if (bWantEnabled == bEnabledActive)
+	{
+		return; // some other cvar changed, or no net transition
+	}
+
+	if (bWantEnabled)
+	{
+		EnableSimulation();
+	}
 	else
 	{
-		UE_LOG(LogBox3D, Log,
-			TEXT("box3d: client world - simulation disabled; actors follow replicated movement."));
+		DisableSimulation();
 	}
 }
 
 void UBox3DSubsystem::Deinitialize()
 {
+	// Always registered in OnWorldBeginPlay (authority and client); drop it here.
+	IConsoleManager::Get().UnregisterConsoleVariableSink_Handle(EnabledSinkHandle);
 	if (LevelAddedHandle.IsValid())
 	{
 		FWorldDelegates::LevelAddedToWorld.Remove(LevelAddedHandle);
@@ -69,6 +185,13 @@ void UBox3DSubsystem::Deinitialize()
 	}
 
 	DestroyBox3DWorld();
+
+	// Drop component registrations on full shutdown (the enable/disable path keeps them).
+	DynamicBodies.Reset();
+	KinematicBodies.Reset();
+	AllBodies.Reset();
+	bEnabledActive = false;
+
 	Super::Deinitialize();
 }
 
@@ -99,11 +222,8 @@ void UBox3DSubsystem::CreateBox3DWorld()
 
 void UBox3DSubsystem::DestroyBox3DWorld()
 {
-	// Bodies are owned/destroyed by their components; just drop our references.
-	DynamicBodies.Reset();
-	KinematicBodies.Reset();
-	AllBodies.Reset();
-
+	// Component registrations are preserved (the enable/disable toggle rebuilds from
+	// them); Deinitialize drops them on full shutdown. Only tear down box3d resources here.
 	if (bWorldValid)
 	{
 		b3DestroyWorld(WorldId); // destroys every body, including bulk static ones
@@ -309,7 +429,9 @@ void UBox3DSubsystem::Tick(float DeltaTime)
 		StepFixed(DeltaTime);
 	}
 
-	if (CVarBox3DDebugDraw.GetValueOnGameThread() != 0)
+	// Debug draw only while box3d is enabled - a disabled sim leaves no bodies to show,
+	// so the wireframes/counter must vanish too (else it looks like it's still running).
+	if (IsBox3DEnabled() && CVarBox3DDebugDraw.GetValueOnGameThread() != 0)
 	{
 		DebugDraw();
 	}

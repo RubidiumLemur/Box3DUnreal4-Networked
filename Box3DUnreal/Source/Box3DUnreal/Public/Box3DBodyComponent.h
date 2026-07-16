@@ -23,7 +23,8 @@ enum class EBox3DShape : uint8
 	Auto,    // Box derived from the root primitive's local bounds.
 	Box,
 	Sphere,
-	Capsule
+	Capsule,
+	Convex   // Hull(s) from the mesh's simple convex collision (falls back to a box).
 };
 
 // Which cooked collision a Static body mirrors. UENUM mirror of StaticGeometry::ESource.
@@ -52,6 +53,12 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	b3BodyId GetBodyId() const { return BodyId; }
+
+	/** Subsystem hook: build this component's box3d body if it is eligible and none
+	 *  exists yet. Called from BeginPlay and on a runtime box3d.Enabled -> on toggle. */
+	void RebuildSimulationBody();
+	/** Subsystem hook: destroy the box3d body but stay registered for a later rebuild. */
+	void TeardownSimulationBody();
 
 	/** Subsystem hook: roll prev<-curr and read the new post-step transform. */
 	void CaptureStepTransform();
@@ -128,9 +135,16 @@ public:
 protected:
 	void CreateBody();
 	void AddShape();
+	/** Attach convex hull shape(s) from the mesh's simple collision. Returns false if
+	 *  the mesh has no convex/box simple collision to build a hull from. */
+	bool AddConvexShapes(const b3ShapeDef& ShapeDef);
+	/** Cache the convex hull wireframe (local Unreal space) for debug draw. Runs on
+	 *  server and client so both can show the shape; independent of body creation. */
+	void BuildConvexDebugGeometry();
 	void DestroyBody();
 	void EnforceAuthorityContract();
 	void EnableReplication();
+	bool ComputeSimulationEligibility();
 	FVector ComputeAutoBoxHalfExtent() const;
 
 private:
@@ -138,6 +152,14 @@ private:
 	TObjectPtr<UBox3DSubsystem> Subsystem = nullptr;
 
 	b3BodyId BodyId = b3_nullBodyId;
+
+	/** Net-role eligibility, resolved once in BeginPlay. Independent of the master switch
+	 *  and world validity so a runtime enable can still build this body. */
+	bool bSimulationEligible = false;
+
+	/** Whether the root was simulating Chaos physics before box3d took it over. Restored
+	 *  on teardown so a runtime disable hands the actor back instead of freezing it. */
+	bool bRestoreChaosSimulation = false;
 
 	/** box3d carries no scale, so we preserve the spawn scale when writing back. */
 	FVector SpawnScale = FVector::OneVector;
@@ -147,6 +169,10 @@ private:
 
 	/** Resolved box half-extents (cm) used for Auto/Box shapes; for debug draw. */
 	FVector ResolvedHalfExtent = FVector(50.0, 50.0, 50.0);
+
+	/** Convex hull wireframe as line-list pairs in local Unreal space (cm, scale baked).
+	 *  Consecutive elements (2i, 2i+1) are one edge's endpoints. Empty unless Shape==Convex. */
+	TArray<FVector> ConvexDebugSegments;
 
 	/** Interpolation endpoints in Unreal space (last two fixed steps). */
 	FTransform PrevTransform = FTransform::Identity;

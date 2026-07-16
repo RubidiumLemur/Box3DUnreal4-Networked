@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HAL/IConsoleManager.h"
 #include "Subsystems/WorldSubsystem.h"
 #include <box3d/box3d.h>
 #include "Box3DSubsystem.generated.h"
@@ -37,6 +38,11 @@ public:
 	virtual TStatId GetStatId() const override;
 	virtual bool IsTickable() const override;
 
+	/** Master switch, shared by the subsystem and every body component. Off means no
+	 *  box3d world, bodies or static geometry. Backed by the box3d.Enabled cvar (also
+	 *  forced off at launch by -DisableBox3D); toggle at runtime to A/B against no-box3d. */
+	static bool IsBox3DEnabled();
+
 	/** The box3d world id. Only valid while IsWorldValid(). */
 	b3WorldId GetWorldId() const { return WorldId; }
 	bool IsWorldValid() const { return bWorldValid; }
@@ -56,6 +62,13 @@ protected:
 	void StepFixed(float DeltaTime);
 	void DebugDraw();
 
+	// Master-switch plumbing. EnableSimulation builds the world, static geometry and
+	// (on a runtime toggle) any already-registered body; DisableSimulation tears them
+	// down but keeps the component registrations so a later enable can rebuild.
+	void EnableSimulation();
+	void DisableSimulation();
+	void OnEnabledCVarChanged();
+
 	// Bulk static geometry: scan streamed levels for tagged actors and mirror their
 	// cooked collision, no per-actor component needed. Opt-in via StaticGeometryTag.
 	void OnLevelAddedToWorld(ULevel* Level, UWorld* World);
@@ -67,6 +80,13 @@ private:
 	b3WorldId WorldId = b3_nullWorldId;
 	bool bWorldValid = false;
 	bool bIsAuthority = false;
+
+	/** True while the simulation is built. Tracks the master switch so the runtime
+	 *  sink only rebuilds/tears down on an actual on<->off transition. */
+	bool bEnabledActive = false;
+
+	/** Fires when any cvar changes; we re-check box3d.Enabled to build or tear down. */
+	FConsoleVariableSinkHandle EnabledSinkHandle;
 
 	/** Real time carried between frames, consumed in fixed increments. */
 	double Accumulator = 0.0;
