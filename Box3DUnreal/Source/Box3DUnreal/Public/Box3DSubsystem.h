@@ -10,6 +10,7 @@
 
 class AActor;
 class UBox3DBodyComponent;
+class UBox3DCollisionData;
 class ULevel;
 
 /**
@@ -76,6 +77,10 @@ protected:
 	void RegisterLevelStaticGeometry(ULevel* Level);
 	void UnregisterLevelStaticGeometry(ULevel* Level);
 
+	// Baked static geometry: instantiate pre-cooked collision from UBox3DCollisionData
+	// assets (no runtime cooking - works in packaged builds). Opt-in via BakedCollisionAssets.
+	void LoadBakedStaticGeometry();
+
 private:
 	b3WorldId WorldId = b3_nullWorldId;
 	bool bWorldValid = false;
@@ -119,6 +124,13 @@ private:
 	UPROPERTY(EditAnywhere, Config, Category = "Box3D|Bulk Static", meta = (ClampMin = "0.0"))
 	float StaticGeometryRestitution = 0.0f;
 
+	/** Pre-baked static collision assets to instantiate on world begin. Produced by the
+	 *  bake commandlet; unlike the tag-scan path these need no runtime cooking, so they are
+	 *  the packaged-build path for static geometry (doc §8, milestone 5). The material above
+	 *  (StaticGeometryFriction/Restitution) is applied to their shapes. */
+	UPROPERTY(EditAnywhere, Config, Category = "Box3D|Bulk Static")
+	TArray<TSoftObjectPtr<UBox3DCollisionData>> BakedCollisionAssets;
+
 	/** Dynamic bodies driven each frame. Weak so a destroyed actor drops out safely. */
 	TArray<TWeakObjectPtr<UBox3DBodyComponent>> DynamicBodies;
 
@@ -139,6 +151,10 @@ private:
 	void CreateBulkStaticBody(AActor* Actor, FBulkStaticLevel& Bulk);
 
 	TMap<TWeakObjectPtr<ULevel>, FBulkStaticLevel> BulkStaticLevels;
+
+	/** Bodies instantiated from the baked collision assets (one bucket per loaded asset).
+	 *  Owned like the bulk levels: freed in DestroyBox3DWorld. */
+	TArray<FBulkStaticLevel> BakedStaticBuckets;
 	FDelegateHandle LevelAddedHandle;
 	FDelegateHandle LevelRemovedHandle;
 };

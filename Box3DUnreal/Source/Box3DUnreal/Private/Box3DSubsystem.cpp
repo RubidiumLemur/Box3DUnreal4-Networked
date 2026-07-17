@@ -2,6 +2,7 @@
 
 #include "Box3DSubsystem.h"
 #include "Box3DBodyComponent.h"
+#include "Box3DCollisionData.h"
 #include "Box3DConversion.h"
 #include "Box3DStaticGeometry.h"
 #include "Box3DLog.h"
@@ -75,6 +76,9 @@ void UBox3DSubsystem::EnableSimulation()
 		return; // creation failed; stay inactive so a later toggle can retry
 	}
 	bEnabledActive = true;
+
+	// Pre-baked static collision: instantiate cached bodies with no runtime cooking.
+	LoadBakedStaticGeometry();
 
 	// Opt-in bulk static path: watch level streaming and scan the already-loaded
 	// levels. Static bodies never move, so only the authority (which simulates)
@@ -243,6 +247,19 @@ void UBox3DSubsystem::DestroyBox3DWorld()
 	}
 	BulkStaticLevels.Reset();
 
+	// Same for baked-asset bodies' mesh data.
+	for (FBulkStaticLevel& Bucket : BakedStaticBuckets)
+	{
+		for (b3MeshData* Mesh : Bucket.Meshes)
+		{
+			if (Mesh != nullptr)
+			{
+				b3DestroyMesh(Mesh);
+			}
+		}
+	}
+	BakedStaticBuckets.Reset();
+
 	WorldId = b3_nullWorldId;
 	bWorldValid = false;
 	Accumulator = 0.0;
@@ -375,6 +392,71 @@ void UBox3DSubsystem::CreateBulkStaticBody(AActor* Actor, FBulkStaticLevel& Bulk
 	}
 }
 
+void UBox3DSubsystem::LoadBakedStaticGeometry()
+{
+	if (!bWorldValid || BakedCollisionAssets.Num() == 0)
+	{
+		return;
+	}
+
+	b3ShapeDef ShapeDef = b3DefaultShapeDef();
+	ShapeDef.baseMaterial.friction = StaticGeometryFriction;
+	ShapeDef.baseMaterial.restitution = StaticGeometryRestitution;
+
+	for (const TSoftObjectPtr<UBox3DCollisionData>& AssetPtr : BakedCollisionAssets)
+	{
+		UBox3DCollisionData* Data = AssetPtr.LoadSynchronous();
+		if (Data == nullptr)
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("box3d: baked collision asset '%s' could not be loaded."),
+				*AssetPtr.ToString());
+			continue;
+		}
+
+		FBulkStaticLevel Bucket;
+		for (const FBox3DBakedBody& Baked : Data->Bodies)
+		{
+			b3BodyDef Def = b3DefaultBodyDef();
+			Def.type = b3_staticBody;
+			Def.position = Box3D::ToBox3DPosition(Baked.WorldTransform.GetLocation());
+			Def.rotation = Box3D::ToBox3DQuat(Baked.WorldTransform.GetRotation());
+
+			b3BodyId Body = b3CreateBody(WorldId, &Def);
+			if (B3_IS_NULL(Body))
+			{
+				continue;
+			}
+
+			// Baked shapes are already fully converted; just instantiate them (no cooking).
+			if (Box3D::StaticGeometry::AddBakedShapes(Body, ShapeDef, Baked, Bucket.Meshes))
+			{
+				Bucket.Bodies.Add(Body);
+			}
+			else
+			{
+				b3DestroyBody(Body);
+			}
+		}
+
+		UE_LOG(LogBox3D, Log, TEXT("box3d: loaded %d baked static bodies from '%s'."),
+			Bucket.Bodies.Num(), *GetNameSafe(Data));
+		if (Bucket.Bodies.Num() > 0)
+		{
+			BakedStaticBuckets.Add(MoveTemp(Bucket));
+		}
+		else
+		{
+			for (b3MeshData* Mesh : Bucket.Meshes)
+			{
+				if (Mesh != nullptr)
+				{
+					b3DestroyMesh(Mesh);
+				}
+			}
+		}
+	}
+}
+
 void UBox3DSubsystem::RegisterBody(UBox3DBodyComponent* Component)
 {
 	if (Component != nullptr)
@@ -454,6 +536,11 @@ void UBox3DSubsystem::DebugDraw()
 	{
 		BulkBodyCount += Pair.Value.Bodies.Num();
 	}
+	int32 BakedBodyCount = 0;
+	for (const FBulkStaticLevel& Bucket : BakedStaticBuckets)
+	{
+		BakedBodyCount += Bucket.Bodies.Num();
+	}
 
 	if (GEngine != nullptr)
 	{
@@ -461,9 +548,9 @@ void UBox3DSubsystem::DebugDraw()
 		const TCHAR* RoleTag = bIsAuthority ? TEXT("AUTH") : TEXT("CLIENT");
 		GEngine->AddOnScreenDebugMessage(
 			static_cast<uint64>(reinterpret_cast<UPTRINT>(this)), 0.0f, FColor::Green,
-			FString::Printf(TEXT("[box3d|%s] %d bodies (%d dynamic, %d bulk static) @ %.0f Hz x%d"),
-				RoleTag, AllBodies.Num() + BulkBodyCount, DynamicBodies.Num(), BulkBodyCount,
-				1.0f / FixedTimeStep, SubStepCount));
+			FString::Printf(TEXT("[box3d|%s] %d bodies (%d dynamic, %d bulk static, %d baked) @ %.0f Hz x%d"),
+				RoleTag, AllBodies.Num() + BulkBodyCount + BakedBodyCount, DynamicBodies.Num(),
+				BulkBodyCount, BakedBodyCount, 1.0f / FixedTimeStep, SubStepCount));
 	}
 
 	for (int32 Index = AllBodies.Num() - 1; Index >= 0; --Index)
@@ -484,9 +571,9 @@ void UBox3DSubsystem::DebugDraw()
 	// place and span. Only the authority holds these (clients keep BulkStaticLevels empty).
 	if (UWorld* World = GetWorld())
 	{
-		for (const TPair<TWeakObjectPtr<ULevel>, FBulkStaticLevel>& Pair : BulkStaticLevels)
+		auto DrawBodyAABBs = [World](const TArray<b3BodyId>& Bodies)
 		{
-			for (const b3BodyId Body : Pair.Value.Bodies)
+			for (const b3BodyId Body : Bodies)
 			{
 				if (B3_IS_NULL(Body))
 				{
@@ -501,6 +588,15 @@ void UBox3DSubsystem::DebugDraw()
 				UEBox += Box3D::FromBox3DVector(Box.upperBound);
 				DrawDebugBox(World, UEBox.GetCenter(), UEBox.GetExtent(), FColor::Cyan, false, -1.0f, 0, 1.0f);
 			}
+		};
+
+		for (const TPair<TWeakObjectPtr<ULevel>, FBulkStaticLevel>& Pair : BulkStaticLevels)
+		{
+			DrawBodyAABBs(Pair.Value.Bodies);
+		}
+		for (const FBulkStaticLevel& Bucket : BakedStaticBuckets)
+		{
+			DrawBodyAABBs(Bucket.Bodies);
 		}
 	}
 }

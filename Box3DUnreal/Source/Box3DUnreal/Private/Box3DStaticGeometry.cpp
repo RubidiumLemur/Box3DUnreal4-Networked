@@ -1,6 +1,7 @@
 // Author: Antonio Lattanzio - emptyvessel
 
 #include "Box3DStaticGeometry.h"
+#include "Box3DCollisionData.h"
 #include "Box3DConversion.h"
 #include "Box3DLog.h"
 #include "Components/PrimitiveComponent.h"
@@ -20,13 +21,15 @@ namespace Box3D::StaticGeometry
 		constexpr int32 MaxHullVertices = 64;
 
 		// Local vertex (cm) -> box3d point (m): bake scale, negate Y (see Box3DConversion.h).
-		FORCEINLINE b3Vec3 LocalToBox3D(const FVector& V, const FVector& Scale)
+		FORCEINLINE FVector3f LocalToBaked(const FVector& V, const FVector& Scale)
 		{
-			return b3Vec3{
+			return FVector3f(
 				static_cast<float>(V.X * Scale.X * Box3D::UnrealToMeters),
 				static_cast<float>(-V.Y * Scale.Y * Box3D::UnrealToMeters),
-				static_cast<float>(V.Z * Scale.Z * Box3D::UnrealToMeters) };
+				static_cast<float>(V.Z * Scale.Z * Box3D::UnrealToMeters));
 		}
+
+		FORCEINLINE b3Vec3 ToB3(const FVector3f& V) { return b3Vec3{ V.X, V.Y, V.Z }; }
 
 		// UE and box3d use opposite front-face winding; the negate-Y flip already reconciles
 		// them, so only a mirrored (negative) scale needs reversing. bInvert = manual override.
@@ -53,34 +56,45 @@ namespace Box3D::StaticGeometry
 			return nullptr;
 		}
 
-		// Convex hull from a point cloud. box3d clones the hull, so we free ours after.
-		bool AddHullFromPoints(b3BodyId Body, const b3ShapeDef& Def, const TArray<FVector>& Points, const FVector& Scale)
+		// --- Stage 1 helpers: UE collision -> FBox3DBakedShape (box3d local space) ---------
+
+		// Append a hull shape from a point cloud (cm). Scale is baked in. Rejects clouds that
+		// don't form a valid hull (b3CreateHull is the same builder used at load).
+		bool AppendHull(TArray<FBox3DBakedShape>& OutShapes, const TArray<FVector>& Points, const FVector& Scale)
 		{
 			if (Points.Num() < 4)
 			{
 				return false;
 			}
 
-			TArray<b3Vec3> Converted;
-			Converted.Reserve(Points.Num());
+			FBox3DBakedShape Shape;
+			Shape.Kind = EBox3DBakedShapeKind::Hull;
+			Shape.Points.Reserve(Points.Num());
 			for (const FVector& P : Points)
 			{
-				Converted.Add(LocalToBox3D(P, Scale));
+				Shape.Points.Add(LocalToBaked(P, Scale));
 			}
 
+			// Validate now (in the editor) so a bad cloud fails visibly here, not at load.
+			TArray<b3Vec3> Converted;
+			Converted.Reserve(Shape.Points.Num());
+			for (const FVector3f& P : Shape.Points)
+			{
+				Converted.Add(ToB3(P));
+			}
 			b3HullData* Hull = b3CreateHull(Converted.GetData(), Converted.Num(), MaxHullVertices);
 			if (Hull == nullptr)
 			{
 				return false;
 			}
-
-			b3CreateHullShape(Body, &Def, Hull);
 			b3DestroyHull(Hull);
+
+			OutShapes.Add(MoveTemp(Shape));
 			return true;
 		}
 
-		// Simple collision: AggGeom convex/box/sphere/capsule. Returns count created.
-		int32 AddSimpleCollision(b3BodyId Body, const b3ShapeDef& Def, UPrimitiveComponent* Prim, const FVector& Scale)
+		// Simple collision: AggGeom convex/box/sphere/capsule -> baked shapes. Returns count.
+		int32 ExtractSimpleCollision(UPrimitiveComponent* Prim, const FVector& Scale, TArray<FBox3DBakedShape>& OutShapes)
 		{
 			UBodySetup* Setup = Prim->GetBodySetup();
 			if (Setup == nullptr)
@@ -101,7 +115,7 @@ namespace Box3D::StaticGeometry
 				{
 					Points.Add(ElemTM.TransformPosition(V));
 				}
-				Created += AddHullFromPoints(Body, Def, Points, Scale) ? 1 : 0;
+				Created += AppendHull(OutShapes, Points, Scale) ? 1 : 0;
 			}
 
 			// Boxes: 8 corners through the hull path.
@@ -117,7 +131,7 @@ namespace Box3D::StaticGeometry
 				{
 					Corners.Add(ElemTM.TransformPosition(FVector(Sx * He.X, Sy * He.Y, Sz * He.Z)));
 				}
-				Created += AddHullFromPoints(Body, Def, Corners, Scale) ? 1 : 0;
+				Created += AppendHull(OutShapes, Corners, Scale) ? 1 : 0;
 			}
 
 			// Non-uniform scale can't stay round, so radii use the min axis scale.
@@ -125,10 +139,11 @@ namespace Box3D::StaticGeometry
 			const float M = static_cast<float>(Box3D::UnrealToMeters);
 			for (const FKSphereElem& Sph : Agg.SphereElems)
 			{
-				b3Sphere Shape;
-				Shape.center = LocalToBox3D(Sph.Center, Scale);
-				Shape.radius = Sph.Radius * RadialScale * M;
-				b3CreateSphereShape(Body, &Def, &Shape);
+				FBox3DBakedShape Shape;
+				Shape.Kind = EBox3DBakedShapeKind::Sphere;
+				Shape.CenterA = LocalToBaked(Sph.Center, Scale);
+				Shape.Radius = Sph.Radius * RadialScale * M;
+				OutShapes.Add(MoveTemp(Shape));
 				++Created;
 			}
 
@@ -137,22 +152,23 @@ namespace Box3D::StaticGeometry
 			{
 				const FTransform ElemTM(Capsule.Rotation, Capsule.Center);
 				const float HalfLen = Capsule.Length * 0.5f;
-				b3Capsule Shape;
-				Shape.center1 = LocalToBox3D(ElemTM.TransformPosition(FVector(0, 0, +HalfLen)), Scale);
-				Shape.center2 = LocalToBox3D(ElemTM.TransformPosition(FVector(0, 0, -HalfLen)), Scale);
-				Shape.radius = Capsule.Radius * RadialScale * M;
-				b3CreateCapsuleShape(Body, &Def, &Shape);
+				FBox3DBakedShape Shape;
+				Shape.Kind = EBox3DBakedShapeKind::Capsule;
+				Shape.CenterA = LocalToBaked(ElemTM.TransformPosition(FVector(0, 0, +HalfLen)), Scale);
+				Shape.CenterB = LocalToBaked(ElemTM.TransformPosition(FVector(0, 0, -HalfLen)), Scale);
+				Shape.Radius = Capsule.Radius * RadialScale * M;
+				OutShapes.Add(MoveTemp(Shape));
 				++Created;
 			}
 
 			return Created;
 		}
 
-		// Complex collision: cooked tri-mesh -> b3Mesh. box3d references the mesh data
-		// (doesn't clone), so it's handed back via OutOwnedMeshes for later destroy.
-		bool AddComplexTriMesh(
-			b3BodyId Body, const b3ShapeDef& Def, IInterface_CollisionDataProvider* Provider,
-			const FVector& Scale, bool bInvertWinding, TArray<b3MeshData*>& OutOwnedMeshes)
+		// Complex collision: cooked tri-mesh -> a single baked Mesh shape (verts + indices,
+		// winding corrected). box3d rebuilds the b3Mesh at load.
+		bool ExtractComplexTriMesh(
+			IInterface_CollisionDataProvider* Provider, const FVector& Scale, bool bInvertWinding,
+			TArray<FBox3DBakedShape>& OutShapes)
 		{
 			if (Provider == nullptr || !Provider->ContainsPhysicsTriMeshData(true))
 			{
@@ -169,38 +185,80 @@ namespace Box3D::StaticGeometry
 				return false;
 			}
 
-			TArray<b3Vec3> Vertices;
-			Vertices.Reserve(TriData.Vertices.Num());
+			FBox3DBakedShape Shape;
+			Shape.Kind = EBox3DBakedShapeKind::Mesh;
+			Shape.Points.Reserve(TriData.Vertices.Num());
 			for (const FVector3f& V : TriData.Vertices)
 			{
-				Vertices.Add(LocalToBox3D(FVector(V), Scale));
+				Shape.Points.Add(LocalToBaked(FVector(V), Scale));
 			}
 
 			const bool bReverse = ShouldReverseWinding(Scale, bInvertWinding);
-			TArray<int32> Indices;
-			Indices.Reserve(TriData.Indices.Num() * 3);
+			Shape.Indices.Reserve(TriData.Indices.Num() * 3);
 			for (const FTriIndices& Tri : TriData.Indices)
 			{
-				Indices.Add(Tri.v0);
+				Shape.Indices.Add(Tri.v0);
 				if (bReverse)
 				{
-					Indices.Add(Tri.v2);
-					Indices.Add(Tri.v1);
+					Shape.Indices.Add(Tri.v2);
+					Shape.Indices.Add(Tri.v1);
 				}
 				else
 				{
-					Indices.Add(Tri.v1);
-					Indices.Add(Tri.v2);
+					Shape.Indices.Add(Tri.v1);
+					Shape.Indices.Add(Tri.v2);
 				}
+			}
+
+			OutShapes.Add(MoveTemp(Shape));
+			return true;
+		}
+
+		// --- Stage 2 helpers: FBox3DBakedShape -> box3d shape on a body -------------------
+
+		void InstantiateHull(b3BodyId Body, const b3ShapeDef& Def, const FBox3DBakedShape& Shape)
+		{
+			if (Shape.Points.Num() < 4)
+			{
+				return;
+			}
+			TArray<b3Vec3> Points;
+			Points.Reserve(Shape.Points.Num());
+			for (const FVector3f& P : Shape.Points)
+			{
+				Points.Add(ToB3(P));
+			}
+			b3HullData* Hull = b3CreateHull(Points.GetData(), Points.Num(), MaxHullVertices);
+			if (Hull == nullptr)
+			{
+				return;
+			}
+			b3CreateHullShape(Body, &Def, Hull); // box3d clones the hull; free ours after
+			b3DestroyHull(Hull);
+		}
+
+		// Returns the b3MeshData the caller must free after the body (nullptr on failure).
+		b3MeshData* InstantiateMesh(b3BodyId Body, const b3ShapeDef& Def, const FBox3DBakedShape& Shape)
+		{
+			if (Shape.Points.Num() < 3 || Shape.Indices.Num() < 3)
+			{
+				return nullptr;
+			}
+
+			TArray<b3Vec3> Vertices;
+			Vertices.Reserve(Shape.Points.Num());
+			for (const FVector3f& P : Shape.Points)
+			{
+				Vertices.Add(ToB3(P));
 			}
 
 			b3MeshDef MeshDef{};
 			MeshDef.vertices = Vertices.GetData();
-			MeshDef.indices = Indices.GetData();
+			MeshDef.indices = const_cast<int32*>(Shape.Indices.GetData());
 			MeshDef.materialIndices = nullptr; // base material for all triangles
 			MeshDef.weldTolerance = 0.0f;
 			MeshDef.vertexCount = Vertices.Num();
-			MeshDef.triangleCount = Indices.Num() / 3;
+			MeshDef.triangleCount = Shape.Indices.Num() / 3;
 			MeshDef.weldVertices = false;
 			MeshDef.useMedianSplit = false;
 			MeshDef.identifyEdges = true;   // adjacency avoids ghost collisions
@@ -208,19 +266,16 @@ namespace Box3D::StaticGeometry
 			b3MeshData* Mesh = b3CreateMesh(&MeshDef, nullptr, 0);
 			if (Mesh == nullptr)
 			{
-				return false;
+				return nullptr;
 			}
 
 			// Scale already baked into verts, so unit shape scale.
 			b3CreateMeshShape(Body, &Def, Mesh, b3Vec3{ 1.0f, 1.0f, 1.0f });
-			OutOwnedMeshes.Add(Mesh);
-			return true;
+			return Mesh;
 		}
 	} // namespace
 
-	bool AddStaticShapes(
-		b3BodyId Body, const b3ShapeDef& Base, AActor* Owner, ESource Source,
-		bool bInvertWinding, TArray<b3MeshData*>& OutOwnedMeshes)
+	bool ExtractStaticCollision(AActor* Owner, ESource Source, bool bInvertWinding, FBox3DBakedBody& Out)
 	{
 		UPrimitiveComponent* Prim = Owner ? Cast<UPrimitiveComponent>(Owner->GetRootComponent()) : nullptr;
 		if (Prim == nullptr)
@@ -228,12 +283,15 @@ namespace Box3D::StaticGeometry
 			return false;
 		}
 
+		Out.WorldTransform = Owner->GetActorTransform();
+		Out.ActorKey = Owner->GetPathName();
+
 		const FVector Scale = Prim->GetComponentScale();
 
 		if (Source == ESource::ComplexCollision || Source == ESource::Auto)
 		{
 			IInterface_CollisionDataProvider* Provider = FindTriMeshProvider(Prim);
-			if (AddComplexTriMesh(Body, Base, Provider, Scale, bInvertWinding, OutOwnedMeshes))
+			if (ExtractComplexTriMesh(Provider, Scale, bInvertWinding, Out.Shapes))
 			{
 				return true;
 			}
@@ -248,8 +306,7 @@ namespace Box3D::StaticGeometry
 		}
 
 		// Auto fell through, or SimpleCollision requested.
-		const int32 SimpleCount = AddSimpleCollision(Body, Base, Prim, Scale);
-		if (SimpleCount > 0)
+		if (ExtractSimpleCollision(Prim, Scale, Out.Shapes) > 0)
 		{
 			return true;
 		}
@@ -258,5 +315,66 @@ namespace Box3D::StaticGeometry
 			TEXT("%s: no cooked collision found for static body (no tri-mesh, no simple primitives)."),
 			*GetNameSafe(Owner));
 		return false;
+	}
+
+	bool AddBakedShapes(
+		b3BodyId Body, const b3ShapeDef& Base, const FBox3DBakedBody& Baked, TArray<b3MeshData*>& OutOwnedMeshes)
+	{
+		int32 Created = 0;
+		for (const FBox3DBakedShape& Shape : Baked.Shapes)
+		{
+			switch (Shape.Kind)
+			{
+			case EBox3DBakedShapeKind::Hull:
+				InstantiateHull(Body, Base, Shape);
+				++Created;
+				break;
+			case EBox3DBakedShapeKind::Mesh:
+				if (b3MeshData* Mesh = InstantiateMesh(Body, Base, Shape))
+				{
+					OutOwnedMeshes.Add(Mesh);
+					++Created;
+				}
+				break;
+			case EBox3DBakedShapeKind::Sphere:
+			{
+				b3Sphere Sphere;
+				Sphere.center = ToB3(Shape.CenterA);
+				Sphere.radius = Shape.Radius;
+				b3CreateSphereShape(Body, &Base, &Sphere);
+				++Created;
+				break;
+			}
+			case EBox3DBakedShapeKind::Capsule:
+			{
+				b3Capsule Capsule;
+				Capsule.center1 = ToB3(Shape.CenterA);
+				Capsule.center2 = ToB3(Shape.CenterB);
+				Capsule.radius = Shape.Radius;
+				b3CreateCapsuleShape(Body, &Base, &Capsule);
+				++Created;
+				break;
+			}
+			}
+		}
+		return Created > 0;
+	}
+
+	bool AddStaticShapes(
+		b3BodyId Body, const b3ShapeDef& Base, AActor* Owner, ESource Source,
+		bool bInvertWinding, TArray<b3MeshData*>& OutOwnedMeshes)
+	{
+		FBox3DBakedBody Baked;
+		if (!ExtractStaticCollision(Owner, Source, bInvertWinding, Baked))
+		{
+			return false;
+		}
+		return AddBakedShapes(Body, Base, Baked, OutOwnedMeshes);
+	}
+
+	FString GetBox3DVersionString()
+	{
+		const b3Version V = b3GetVersion();
+		return FString::Printf(TEXT("%d.%d.%d"), V.major, V.minor, V.revision);
 	}
 } // namespace Box3D::StaticGeometry
