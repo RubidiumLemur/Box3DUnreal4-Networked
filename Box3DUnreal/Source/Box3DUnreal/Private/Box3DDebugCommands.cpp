@@ -1,13 +1,15 @@
 // Author: Antonio Lattanzio - emptyvessel
 
-// Demo/recording helpers: a console command that pours a configurable heap of box3d
-// bodies in front of the player. Purpose-built for capturing the convex pour + debug
-// wireframe reveal; not part of the runtime API.
+// Demo/debug helpers: console commands that pour a heap of box3d bodies in front of the
+// player and fire the spatial queries from the player's view. Purpose-built for capturing
+// the convex pour + debug wireframe reveal and for eyeballing query results; not part of
+// the runtime API.
 
 #include "Box3DBodyComponent.h"
 #include "Box3DSubsystem.h"
 #include "Box3DLog.h"
 #include "Components/StaticMeshComponent.h"
+#include "DrawDebugHelpers.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
@@ -190,4 +192,95 @@ namespace
 		TEXT("Pour N box3d props in front of the player (default 50). Configure with ")
 		TEXT("box3d.SpawnMesh / SpawnShape / SpawnHeight / SpawnForward / SpawnSpread / SpawnScale."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&SpawnPour));
+
+	// --- Query smoke tests -------------------------------------------------------------
+	// Fire the subsystem's queries from the player's viewpoint and draw what came back.
+	// The draws persist ~5s so the result can be inspected after the call.
+
+	constexpr float QueryDrawSeconds = 5.0f;
+
+	UBox3DSubsystem* GetQuerySubsystem(UWorld* World, const TCHAR* CommandName)
+	{
+		UBox3DSubsystem* Subsystem = World ? World->GetSubsystem<UBox3DSubsystem>() : nullptr;
+		if (Subsystem == nullptr || !Subsystem->IsWorldValid())
+		{
+			// No box3d world: disabled, or this is a client (queries only run where box3d sims).
+			UE_LOG(LogBox3D, Warning, TEXT("%s: no box3d world to query (disabled, or a client)."), CommandName);
+			return nullptr;
+		}
+		return Subsystem;
+	}
+
+	void QueryRay(const TArray<FString>& Args, UWorld* World)
+	{
+		UBox3DSubsystem* Subsystem = GetQuerySubsystem(World, TEXT("box3d.QueryRay"));
+		APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+		if (Subsystem == nullptr || PC == nullptr)
+		{
+			return;
+		}
+
+		const float Distance = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 5000.0f;
+		FVector Start;
+		FRotator ViewRotation;
+		PC->GetPlayerViewPoint(Start, ViewRotation);
+		const FVector End = Start + ViewRotation.Vector() * Distance;
+
+		FBox3DHitResult Hit;
+		const bool bHit = Subsystem->RaycastClosest(Start, End, FBox3DQueryFilter(), Hit);
+
+		DrawDebugLine(World, Start, bHit ? Hit.Location : End, bHit ? FColor::Green : FColor::Red, false,
+			QueryDrawSeconds, 0, 1.0f);
+		if (!bHit)
+		{
+			UE_LOG(LogBox3D, Log, TEXT("box3d.QueryRay: no hit within %.0fcm."), Distance);
+			return;
+		}
+
+		DrawDebugPoint(World, Hit.Location, 10.0f, FColor::Yellow, false, QueryDrawSeconds);
+		DrawDebugDirectionalArrow(World, Hit.Location, Hit.Location + Hit.Normal * 50.0, 8.0f, FColor::Cyan, false,
+			QueryDrawSeconds, 0, 1.0f);
+		UE_LOG(LogBox3D, Log, TEXT("box3d.QueryRay: hit '%s' at %s (%.1fcm, tri %d), normal %s."),
+			Hit.HitActor ? *Hit.HitActor->GetName() : TEXT("<baked static>"), *Hit.Location.ToCompactString(),
+			Hit.Distance, Hit.TriangleIndex, *Hit.Normal.ToCompactString());
+	}
+
+	void QueryOverlap(const TArray<FString>& Args, UWorld* World)
+	{
+		UBox3DSubsystem* Subsystem = GetQuerySubsystem(World, TEXT("box3d.QueryOverlap"));
+		if (Subsystem == nullptr)
+		{
+			return;
+		}
+
+		FVector Centre;
+		FRotator RefRotation;
+		if (!GetPlayerReference(World, Centre, RefRotation))
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("box3d.QueryOverlap: no player to query around."));
+			return;
+		}
+
+		const float Radius = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 500.0f;
+		TArray<AActor*> Actors;
+		Subsystem->OverlapSphere(Centre, Radius, FBox3DQueryFilter(), Actors);
+
+		DrawDebugSphere(World, Centre, Radius, 24, Actors.Num() > 0 ? FColor::Green : FColor::Red, false,
+			QueryDrawSeconds, 0, 1.0f);
+		for (const AActor* Actor : Actors)
+		{
+			DrawDebugPoint(World, Actor->GetActorLocation(), 12.0f, FColor::Yellow, false, QueryDrawSeconds);
+		}
+		UE_LOG(LogBox3D, Log, TEXT("box3d.QueryOverlap: %d actor(s) within %.0fcm."), Actors.Num(), Radius);
+	}
+
+	FAutoConsoleCommandWithWorldAndArgs GBox3DQueryRayCommand(
+		TEXT("box3d.QueryRay"),
+		TEXT("Raycast the box3d world from the player's view (default 5000cm) and draw the closest hit."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&QueryRay));
+
+	FAutoConsoleCommandWithWorldAndArgs GBox3DQueryOverlapCommand(
+		TEXT("box3d.QueryOverlap"),
+		TEXT("Sphere-overlap the box3d world around the player (default radius 500cm) and list the actors."),
+		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&QueryOverlap));
 } // namespace

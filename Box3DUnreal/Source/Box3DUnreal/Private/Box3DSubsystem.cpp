@@ -369,6 +369,9 @@ void UBox3DSubsystem::CreateBulkStaticBody(AActor* Actor, FBulkStaticLevel& Bulk
 	Def.position = Box3D::ToBox3DPosition(Xform.GetLocation());
 	Def.rotation = Box3D::ToBox3DQuat(Xform.GetRotation());
 
+	// Lets a query hit resolve back to the actor; the body is freed on stream-out with it.
+	Def.userData = Actor;
+
 	b3BodyId Body = b3CreateBody(WorldId, &Def);
 	if (B3_IS_NULL(Body))
 	{

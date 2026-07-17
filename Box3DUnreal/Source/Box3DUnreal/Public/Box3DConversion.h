@@ -45,6 +45,18 @@ namespace Box3D
 		return FVector(V.x * MetersToUnreal, -V.y * MetersToUnreal, V.z * MetersToUnreal);
 	}
 
+	/** Unit direction / surface normal: handedness only, never the cm<->m scale (scaling a
+	 *  normal by 100 is the easy mistake - it stays unit length here). */
+	FORCEINLINE b3Vec3 ToBox3DDirection(const FVector& V)
+	{
+		return b3Vec3{ static_cast<float>(V.X), static_cast<float>(-V.Y), static_cast<float>(V.Z) };
+	}
+
+	FORCEINLINE FVector FromBox3DDirection(const b3Vec3& V)
+	{
+		return FVector(V.x, -V.y, V.z);
+	}
+
 	FORCEINLINE b3Quat ToBox3DQuat(const FQuat& Q)
 	{
 		return b3Quat{

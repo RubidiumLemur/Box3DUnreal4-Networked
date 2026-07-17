@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Box3DQueryTypes.h"
 #include "HAL/IConsoleManager.h"
 #include "Subsystems/WorldSubsystem.h"
 #include <box3d/box3d.h>
@@ -56,6 +57,48 @@ public:
 	void RegisterDynamicBody(UBox3DBodyComponent* Component);
 	void RegisterKinematicBody(UBox3DBodyComponent* Component);
 	void UnregisterBody(UBox3DBodyComponent* Component);
+
+	// --- Spatial queries (doc §11) --------------------------------------------------
+	// All positions/extents are Unreal world space in cm; results come back the same way.
+	// Queries run against the box3d world, so they only return hits where box3d simulates:
+	// Standalone and servers. On a pure client there is no world and every query returns
+	// false/empty - use UE traces there, or call these on the authority.
+
+	/** Closest shape hit along Start->End. Initial overlap at Start is ignored. */
+	UFUNCTION(BlueprintCallable, Category = "Box3D|Query")
+	bool RaycastClosest(const FVector& Start, const FVector& End, const FBox3DQueryFilter& Filter,
+		FBox3DHitResult& OutHit) const;
+
+	/** Every shape hit along Start->End, sorted near to far. */
+	UFUNCTION(BlueprintCallable, Category = "Box3D|Query")
+	bool RaycastMulti(const FVector& Start, const FVector& End, const FBox3DQueryFilter& Filter,
+		TArray<FBox3DHitResult>& OutHits) const;
+
+	/** Broadphase only: actors whose shape bounds *potentially* overlap the box. Cheap, but
+	 *  a hit is not an exact overlap - use OverlapSphere/OverlapBox for a narrow-phase test. */
+	UFUNCTION(BlueprintCallable, Category = "Box3D|Query")
+	bool OverlapAABB(const FVector& Center, const FVector& HalfExtent, const FBox3DQueryFilter& Filter,
+		TArray<AActor*>& OutActors) const;
+
+	/** Actors exactly overlapping the sphere. */
+	UFUNCTION(BlueprintCallable, Category = "Box3D|Query")
+	bool OverlapSphere(const FVector& Center, float Radius, const FBox3DQueryFilter& Filter,
+		TArray<AActor*>& OutActors) const;
+
+	/** Actors exactly overlapping the oriented box. */
+	UFUNCTION(BlueprintCallable, Category = "Box3D|Query")
+	bool OverlapBox(const FVector& Center, const FVector& HalfExtent, const FRotator& Rotation,
+		const FBox3DQueryFilter& Filter, TArray<AActor*>& OutActors) const;
+
+	/** Sweep a sphere Start->End and return the first blocking hit. */
+	UFUNCTION(BlueprintCallable, Category = "Box3D|Query")
+	bool SphereCast(const FVector& Start, const FVector& End, float Radius, const FBox3DQueryFilter& Filter,
+		FBox3DHitResult& OutHit) const;
+
+	/** Sweep an oriented box Start->End (no rotation over the sweep) and return the first hit. */
+	UFUNCTION(BlueprintCallable, Category = "Box3D|Query")
+	bool BoxCast(const FVector& Start, const FVector& End, const FVector& HalfExtent, const FRotator& Rotation,
+		const FBox3DQueryFilter& Filter, FBox3DHitResult& OutHit) const;
 
 protected:
 	void CreateBox3DWorld();

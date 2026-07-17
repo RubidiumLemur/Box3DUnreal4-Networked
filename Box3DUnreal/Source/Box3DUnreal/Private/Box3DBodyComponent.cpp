@@ -255,6 +255,10 @@ void UBox3DBodyComponent::CreateBody()
 	Def.linearDamping = LinearDamping;
 	Def.angularDamping = AngularDamping;
 
+	// Lets a query hit resolve back to the actor. Safe because DestroyBody runs on EndPlay,
+	// so the body never outlives the owner.
+	Def.userData = GetOwner();
+
 	BodyId = b3CreateBody(Subsystem->GetWorldId(), &Def);
 }
 
