@@ -11,6 +11,8 @@
 #include "Engine/Level.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "Misc/PackageName.h"
+#include "UObject/Package.h"
 
 static TAutoConsoleVariable<int32> CVarBox3DDebugDraw(
 	TEXT("box3d.DebugDraw"),
@@ -395,9 +397,83 @@ void UBox3DSubsystem::CreateBulkStaticBody(AActor* Actor, FBulkStaticLevel& Bulk
 	}
 }
 
+TArray<UBox3DCollisionData*> UBox3DSubsystem::GatherBakedCollisionAssets() const
+{
+	TArray<UBox3DCollisionData*> Assets;
+
+	for (const TSoftObjectPtr<UBox3DCollisionData>& AssetPtr : BakedCollisionAssets)
+	{
+		if (UBox3DCollisionData* Data = AssetPtr.LoadSynchronous())
+		{
+			Assets.AddUnique(Data);
+		}
+		else
+		{
+			UE_LOG(LogBox3D, Warning, TEXT("box3d: baked collision asset '%s' could not be loaded."),
+				*AssetPtr.ToString());
+		}
+	}
+
+	if (bAutoDiscoverBakedCollision)
+	{
+		UBox3DCollisionData* Found = FindBakedAssetForCurrentMap();
+		if (Found != nullptr && !Assets.Contains(Found))
+		{
+			UE_LOG(LogBox3D, Log, TEXT("box3d: auto-discovered baked collision '%s' for this map."),
+				*GetNameSafe(Found));
+			Assets.Add(Found);
+		}
+	}
+
+	return Assets;
+}
+
+UBox3DCollisionData* UBox3DSubsystem::FindBakedAssetForCurrentMap() const
+{
+	const UWorld* World = GetWorld();
+	if (World == nullptr)
+	{
+		return nullptr;
+	}
+
+	// PIE renames the package to UEDPIE_0_<Map>; the bake keyed off the real map name.
+	const FString MapPackage = UWorld::RemovePIEPrefix(World->GetOutermost()->GetName());
+	const FString AssetPackage = UBox3DCollisionData::DeriveAssetPackageName(MapPackage);
+	if (!FPackageName::DoesPackageExist(AssetPackage))
+	{
+		return nullptr; // nothing baked for this map; the live component/tag paths still apply
+	}
+
+	const FString ObjectPath =
+		FString::Printf(TEXT("%s.%s"), *AssetPackage, *FPackageName::GetShortName(AssetPackage));
+	return LoadObject<UBox3DCollisionData>(nullptr, *ObjectPath);
+}
+
+void UBox3DSubsystem::WarnIfBakeStale(const UBox3DCollisionData* Data) const
+{
+#if WITH_EDITOR
+	FString Reason;
+	if (Data != nullptr && Data->IsStale(Reason))
+	{
+		// Warn, never refuse: stale geometry is usually still close enough to keep iterating on,
+		// and an implicit re-bake here would stall PIE for however long the level takes.
+		UE_LOG(LogBox3D, Warning,
+			TEXT("box3d: baked collision '%s' is stale - %s. Static geometry may not match the level; ")
+			TEXT("re-bake with: -run=Box3DBake -Map=%s"),
+			*GetNameSafe(Data), *Reason, *Data->SourceLevel);
+	}
+#endif
+}
+
 void UBox3DSubsystem::LoadBakedStaticGeometry()
 {
-	if (!bWorldValid || BakedCollisionAssets.Num() == 0)
+	if (!bWorldValid)
+	{
+		return;
+	}
+
+	const TArray<UBox3DCollisionData*> Assets = GatherBakedCollisionAssets();
+	if (Assets.Num() == 0)
 	{
 		return;
 	}
@@ -406,15 +482,9 @@ void UBox3DSubsystem::LoadBakedStaticGeometry()
 	ShapeDef.baseMaterial.friction = StaticGeometryFriction;
 	ShapeDef.baseMaterial.restitution = StaticGeometryRestitution;
 
-	for (const TSoftObjectPtr<UBox3DCollisionData>& AssetPtr : BakedCollisionAssets)
+	for (UBox3DCollisionData* Data : Assets)
 	{
-		UBox3DCollisionData* Data = AssetPtr.LoadSynchronous();
-		if (Data == nullptr)
-		{
-			UE_LOG(LogBox3D, Warning, TEXT("box3d: baked collision asset '%s' could not be loaded."),
-				*AssetPtr.ToString());
-			continue;
-		}
+		WarnIfBakeStale(Data);
 
 		FBulkStaticLevel Bucket;
 		for (const FBox3DBakedBody& Baked : Data->Bodies)

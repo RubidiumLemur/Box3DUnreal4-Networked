@@ -124,6 +124,15 @@ protected:
 	// assets (no runtime cooking - works in packaged builds). Opt-in via BakedCollisionAssets.
 	void LoadBakedStaticGeometry();
 
+	/** The configured assets plus, if bAutoDiscoverBakedCollision, this map's BC_ asset. Deduped,
+	 *  so listing an auto-discovered asset explicitly is harmless. */
+	TArray<UBox3DCollisionData*> GatherBakedCollisionAssets() const;
+	UBox3DCollisionData* FindBakedAssetForCurrentMap() const;
+
+	/** Editor/PIE only: warn when a bake no longer matches its source level or box3d version.
+	 *  A packaged build can't re-bake, so the check runs where it can still be acted on. */
+	void WarnIfBakeStale(const UBox3DCollisionData* Data) const;
+
 private:
 	b3WorldId WorldId = b3_nullWorldId;
 	bool bWorldValid = false;
@@ -170,9 +179,16 @@ private:
 	/** Pre-baked static collision assets to instantiate on world begin. Produced by the
 	 *  bake commandlet; unlike the tag-scan path these need no runtime cooking, so they are
 	 *  the packaged-build path for static geometry (doc §8, milestone 5). The material above
-	 *  (StaticGeometryFriction/Restitution) is applied to their shapes. */
+	 *  (StaticGeometryFriction/Restitution) is applied to their shapes. Loaded on top of
+	 *  whatever bAutoDiscoverBakedCollision finds. */
 	UPROPERTY(EditAnywhere, Config, Category = "Box3D|Bulk Static")
 	TArray<TSoftObjectPtr<UBox3DCollisionData>> BakedCollisionAssets;
+
+	/** Also load the current map's baked asset (BC_<MapName> beside the map) without it being
+	 *  listed above. On by default: forgetting to list an asset silently loads a level with no
+	 *  static collision, which looks like a physics bug rather than a config mistake. */
+	UPROPERTY(EditAnywhere, Config, Category = "Box3D|Bulk Static")
+	bool bAutoDiscoverBakedCollision = true;
 
 	/** Dynamic bodies driven each frame. Weak so a destroyed actor drops out safely. */
 	TArray<TWeakObjectPtr<UBox3DBodyComponent>> DynamicBodies;

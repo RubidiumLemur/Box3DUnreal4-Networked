@@ -83,6 +83,11 @@ class BOX3DUNREAL_API UBox3DCollisionData : public UObject
 	GENERATED_BODY()
 
 public:
+	/** The asset a map bakes to by convention: BC_<MapName> beside the map. Shared by the
+	 *  bake commandlet (output) and the runtime auto-discovery (lookup), so the two can
+	 *  never disagree about where a level's baked collision lives. */
+	static FString DeriveAssetPackageName(const FString& MapPackageName);
+
 	// Level (or source) this was baked from, for identification in the editor.
 	UPROPERTY(VisibleAnywhere, Category = "Box3D")
 	FString SourceLevel;
@@ -95,6 +100,34 @@ public:
 	UPROPERTY(VisibleAnywhere, Category = "Box3D")
 	bool bContainsTriMesh = false;
 
+	// Tag the bake was run with (-Tag=), or None for the component-only bake.
+	UPROPERTY(VisibleAnywhere, Category = "Box3D")
+	FName BakeTag;
+
+	UPROPERTY(VisibleAnywhere, Category = "Box3D")
+	FDateTime BakeTime = FDateTime(0);
+
+	/** Opaque identity of the source level's files at bake time (see ComputeSourceFingerprint).
+	 *  Differs from the level's current fingerprint => the bake is out of date. */
+	UPROPERTY(VisibleAnywhere, Category = "Box3D")
+	FString SourceFingerprint;
+
 	UPROPERTY()
 	TArray<FBox3DBakedBody> Bodies;
+
+#if WITH_EDITOR
+	/** Cheap identity of a level on disk: newest modified time + total size + file count over
+	 *  the .umap AND its _ExternalActors_ folder. The external actors matter - under One File
+	 *  Per Actor, moving an actor rewrites its own package and never touches the .umap, so a
+	 *  .umap-only timestamp would call an edited world fresh. Empty if the map can't be found.
+	 *
+	 *  This is a "something changed" signal, not a geometry hash: re-saving a level without
+	 *  touching collision also changes it. It only ever warns, so a false positive costs a
+	 *  re-bake, while a miss would ship wrong collision. */
+	static FString ComputeSourceFingerprint(const FString& MapPackageName);
+
+	/** True if this bake can no longer be trusted: box3d version bump, source level edited
+	 *  since the bake, or a bake old enough to predate fingerprinting. */
+	bool IsStale(FString& OutReason) const;
+#endif
 };

@@ -23,14 +23,6 @@ UBox3DBakeCommandlet::UBox3DBakeCommandlet()
 
 namespace
 {
-	// Default output asset for a map: sibling package named BC_<MapName>.
-	FString DeriveOutPackageName(const FString& MapPackageName)
-	{
-		const FString Path = FPackageName::GetLongPackagePath(MapPackageName); // /Game/Maps
-		const FString Name = FPackageName::GetShortName(MapPackageName);        // Foo
-		return FString::Printf(TEXT("%s/BC_%s"), *Path, *Name);
-	}
-
 	// Whether this actor should be baked, and with which extraction settings.
 	bool ResolveBakeSettings(
 		AActor* Actor, FName StaticTag,
@@ -94,7 +86,8 @@ int32 UBox3DBakeCommandlet::Main(const FString& Params)
 	{
 		const FString MapPackage = Map.TrimStartAndEnd();
 		// -Out only applies to a single-map bake; otherwise derive per map.
-		const FString OutPackage = (bHasOut && Maps.Num() == 1) ? OutValue : DeriveOutPackageName(MapPackage);
+		const FString OutPackage =
+			(bHasOut && Maps.Num() == 1) ? OutValue : UBox3DCollisionData::DeriveAssetPackageName(MapPackage);
 		if (!BakeMap(MapPackage, OutPackage, StaticTag))
 		{
 			++Failures;
@@ -205,6 +198,11 @@ bool UBox3DBakeCommandlet::BakeMap(const FString& MapPackageName, const FString&
 	Data->SourceLevel = MapPackageName;
 	Data->Box3DVersion = Box3D::StaticGeometry::GetBox3DVersionString();
 	Data->bContainsTriMesh = bAnyTriMesh;
+	Data->BakeTag = StaticTag;
+	Data->BakeTime = FDateTime::UtcNow();
+	// Fingerprint the level as it was on disk when we extracted it, so a later edit reads
+	// as stale. LoadMap read from those same files, so computing it here matches the bake.
+	Data->SourceFingerprint = UBox3DCollisionData::ComputeSourceFingerprint(MapPackageName);
 	Data->Bodies = MoveTemp(BakedBodies);
 
 	Data->MarkPackageDirty();
