@@ -52,6 +52,13 @@ public:
 	/** True where box3d simulates: Standalone and servers, never a pure client. */
 	bool IsSimulationAuthority() const { return bIsAuthority; }
 
+	/** djb2 digest of every dynamic body's state (transform + velocity), for determinism /
+	 *  desync detection (doc §14). Bodies are folded in a stable order (owner path name) so the
+	 *  same world hashes the same across runs. OutBodyCount reports how many contributed.
+	 *  NOTE: stable within one build/scenario; a cross-machine desync check additionally needs a
+	 *  shared body ordering (networked ids - a D2 concern). Zero if no world / no dynamic bodies. */
+	uint32 ComputeWorldStateHash(int32& OutBodyCount) const;
+
 	/** All bodies register for debug draw; dynamic ones also register for sync. */
 	void RegisterBody(UBox3DBodyComponent* Component);
 	void RegisterDynamicBody(UBox3DBodyComponent* Component);
@@ -153,6 +160,12 @@ private:
 
 	UPROPERTY(EditAnywhere, Category = "Box3D")
 	int32 SubStepCount = 4;
+
+	/** box3d solver threads. Keep at 1 for a deterministic sim (server authority / rollback):
+	 *  box3d partitions the constraint graph by worker count, so a different count changes the
+	 *  result. Raise only for a single-machine sim that needs no cross-peer reproducibility. */
+	UPROPERTY(EditAnywhere, Config, Category = "Box3D", meta = (ClampMin = "1"))
+	int32 WorkerCount = 1;
 
 	/** Spiral-of-death guard: never simulate more than this much time per frame. */
 	UPROPERTY(EditAnywhere, Category = "Box3D")

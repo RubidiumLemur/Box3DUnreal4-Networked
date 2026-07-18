@@ -1,6 +1,8 @@
 // Author: Antonio Lattanzio - emptyvessel
 
+#include "Box3DBodyComponent.h"
 #include "Box3DConversion.h"
+#include "Box3DSnapshot.h"
 #include "Box3DSubsystem.h"
 #include "GameFramework/Actor.h"
 
@@ -124,6 +126,38 @@ namespace
 		Proxy.radius = 0.0f;
 		return Proxy;
 	}
+}
+
+uint32 UBox3DSubsystem::ComputeWorldStateHash(int32& OutBodyCount) const
+{
+	OutBodyCount = 0;
+	if (!bWorldValid)
+	{
+		return 0;
+	}
+
+	// Gather live dynamic bodies, then sort by owner path name for a stable fold order - the
+	// registration order (BeginPlay) is not reproducible, but the path name is.
+	TArray<TPair<FString, b3BodyId>> Bodies;
+	Bodies.Reserve(DynamicBodies.Num());
+	for (const TWeakObjectPtr<UBox3DBodyComponent>& Weak : DynamicBodies)
+	{
+		const UBox3DBodyComponent* Comp = Weak.Get();
+		if (Comp == nullptr || B3_IS_NULL(Comp->GetBodyId()))
+		{
+			continue;
+		}
+		Bodies.Emplace(GetNameSafe(Comp->GetOwner()), Comp->GetBodyId());
+	}
+	Bodies.Sort([](const TPair<FString, b3BodyId>& A, const TPair<FString, b3BodyId>& B) { return A.Key < B.Key; });
+
+	uint32 Hash = B3_HASH_INIT;
+	for (const TPair<FString, b3BodyId>& Entry : Bodies)
+	{
+		Hash = Box3D::HashBody(Hash, Entry.Value);
+	}
+	OutBodyCount = Bodies.Num();
+	return Hash;
 }
 
 bool UBox3DSubsystem::RaycastClosest(const FVector& Start, const FVector& End, const FBox3DQueryFilter& Filter,
