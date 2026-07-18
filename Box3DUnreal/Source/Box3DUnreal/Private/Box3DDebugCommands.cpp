@@ -296,7 +296,8 @@ namespace
 		}
 		int32 BodyCount = 0;
 		const uint32 Hash = Subsystem->ComputeWorldStateHash(BodyCount);
-		UE_LOG(LogBox3D, Log, TEXT("box3d.HashState: 0x%08X over %d dynamic bodies."), Hash, BodyCount);
+		UE_LOG(LogBox3D, Log, TEXT("box3d.HashState: frame %lld, 0x%08X over %d dynamic bodies."),
+			Subsystem->GetSimulationFrame(), Hash, BodyCount);
 	}
 
 	FAutoConsoleCommandWithWorld GBox3DHashStateCommand(

@@ -221,6 +221,7 @@ void UBox3DSubsystem::CreateBox3DWorld()
 
 	WorldId = b3CreateWorld(&Def);
 	bWorldValid = b3World_IsValid(WorldId);
+	SimulationFrame = 0;
 
 	if (bWorldValid)
 	{
@@ -707,6 +708,7 @@ void UBox3DSubsystem::StepFixed(float DeltaTime)
 
 		b3World_Step(WorldId, FixedTimeStep, SubStepCount);
 		Accumulator -= FixedTimeStep;
+		++SimulationFrame; // monotonic fixed-step index: the timeline a rollback tags against (§11b)
 
 		for (int32 Index = DynamicBodies.Num() - 1; Index >= 0; --Index)
 		{

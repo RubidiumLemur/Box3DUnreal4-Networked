@@ -52,6 +52,10 @@ public:
 	/** True where box3d simulates: Standalone and servers, never a pure client. */
 	bool IsSimulationAuthority() const { return bIsAuthority; }
 
+	/** Monotonic count of fixed steps taken since world create - the deterministic timeline a
+	 *  rollback aligns to (doc §11b). Same step count from the same start gives the same state. */
+	int64 GetSimulationFrame() const { return SimulationFrame; }
+
 	/** djb2 digest of every dynamic body's state (transform + velocity), for determinism /
 	 *  desync detection (doc §14). Bodies are folded in a stable order (owner path name) so the
 	 *  same world hashes the same across runs. OutBodyCount reports how many contributed.
@@ -154,6 +158,9 @@ private:
 
 	/** Real time carried between frames, consumed in fixed increments. */
 	double Accumulator = 0.0;
+
+	/** Fixed steps taken since world create (see GetSimulationFrame). */
+	int64 SimulationFrame = 0;
 
 	UPROPERTY(EditAnywhere, Category = "Box3D")
 	float FixedTimeStep = 1.0f / 60.0f;
