@@ -283,4 +283,25 @@ namespace
 		TEXT("box3d.QueryOverlap"),
 		TEXT("Sphere-overlap the box3d world around the player (default radius 500cm) and list the actors."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&QueryOverlap));
+
+	// Print the live world's state hash (doc §14). Run it on server and client with the sim paused
+	// (pause box3d.Enabled or the game) to eyeball a desync; the number is stable for a given build
+	// and scenario. Cross-machine comparison still needs a shared body ordering (a D2 concern).
+	void HashState(UWorld* World)
+	{
+		UBox3DSubsystem* Subsystem = GetQuerySubsystem(World, TEXT("box3d.HashState"));
+		if (Subsystem == nullptr)
+		{
+			return;
+		}
+		int32 BodyCount = 0;
+		const uint32 Hash = Subsystem->ComputeWorldStateHash(BodyCount);
+		UE_LOG(LogBox3D, Log, TEXT("box3d.HashState: frame %lld, 0x%08X over %d dynamic bodies."),
+			Subsystem->GetSimulationFrame(), Hash, BodyCount);
+	}
+
+	FAutoConsoleCommandWithWorld GBox3DHashStateCommand(
+		TEXT("box3d.HashState"),
+		TEXT("Print the djb2 state hash of the live world's dynamic bodies (determinism / desync check)."),
+		FConsoleCommandWithWorldDelegate::CreateStatic(&HashState));
 } // namespace

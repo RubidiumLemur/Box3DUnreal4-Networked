@@ -211,14 +211,24 @@ void UBox3DSubsystem::CreateBox3DWorld()
 	b3WorldDef Def = b3DefaultWorldDef();
 	Def.gravity = Box3D::ToBox3DVector(Gravity);
 
+	// Pin the worker count. box3d's built-in scheduler re-partitions the constraint graph by
+	// worker count, so >1 is not reproducible across peers (the headers call replaying at a
+	// different count a "cross-thread determinism test"). 1 = serial, the deterministic path a
+	// server-authoritative sim and any future rollback rely on (doc §10, §14). It is also the
+	// box3d default today (workerCount 0 -> serial fallback) - setting it explicitly stops a
+	// later "enable workers for perf" from silently breaking determinism.
+	Def.workerCount = static_cast<uint32>(FMath::Max(1, WorkerCount));
+
 	WorldId = b3CreateWorld(&Def);
 	bWorldValid = b3World_IsValid(WorldId);
+	SimulationFrame = 0;
 
 	if (bWorldValid)
 	{
 		const b3Version V = b3GetVersion();
-		UE_LOG(LogBox3D, Log, TEXT("box3d %d.%d.%d world created (gravity %s cm/s^2, %.0f Hz x%d substeps)."),
-			V.major, V.minor, V.revision, *Gravity.ToCompactString(), 1.0f / FixedTimeStep, SubStepCount);
+		UE_LOG(LogBox3D, Log, TEXT("box3d %d.%d.%d world created (gravity %s cm/s^2, %.0f Hz x%d substeps, %d worker%s)."),
+			V.major, V.minor, V.revision, *Gravity.ToCompactString(), 1.0f / FixedTimeStep, SubStepCount,
+			Def.workerCount, Def.workerCount == 1 ? TEXT("") : TEXT("s"));
 	}
 	else
 	{
@@ -698,6 +708,7 @@ void UBox3DSubsystem::StepFixed(float DeltaTime)
 
 		b3World_Step(WorldId, FixedTimeStep, SubStepCount);
 		Accumulator -= FixedTimeStep;
+		++SimulationFrame; // monotonic fixed-step index: the timeline a rollback tags against (§11b)
 
 		for (int32 Index = DynamicBodies.Num() - 1; Index >= 0; --Index)
 		{
