@@ -154,8 +154,8 @@ box3d.DebugDraw 0
 
 Tested with:
 
-* Unreal Engine **5.7.4**
-* Unreal Engine **5.8.1**
+* Unreal Engine **5.7.x**
+* Unreal Engine **5.8.x**
 
 ---
 
