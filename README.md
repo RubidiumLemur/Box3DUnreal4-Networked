@@ -37,6 +37,10 @@ The goal of this project is to provide a clean and lightweight Unreal-friendly i
 * Box3D world and simulation support
 * Lightweight integration layer
 * Static mesh simulation support
+* Sphere, Box, Capsule and Convex Hulls support
+* Unreal Actor / Component integration
+* Debug visualization
+* Example map
 
 More features and examples will be added as the project evolves.
 
@@ -98,6 +102,10 @@ The component will register the mesh with the Box3D simulation and handle physic
 Alternatively, you can add the **Box3DBody Component** directly from the Actor Components panel in the Outliner.
 
 ![Adding Box3DBody Component](https://github.com/user-attachments/assets/8df90aab-c257-4f5e-bfc9-55cdea646532)
+
+I've also included an Example Map in the Content folder.
+
+<img width="1316" height="387" alt="image" src="https://github.com/user-attachments/assets/ad8f14c1-32c3-42c9-a832-c2ad992994e8" />
 
 ---
 
@@ -180,11 +188,7 @@ Planned improvements:
 
 * Physics world management
 * Body creation helpers
-* Collision shape support
-* Unreal Actor / Component integration
 * Blueprint support
-* Debug visualization
-* Example project
 
 ---
 
