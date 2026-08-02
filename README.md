@@ -14,7 +14,7 @@ Hi, I'm Antonio Lattanzio. I'm a Principal Engineer at **Empty Vessel**, where w
 I'm also the founder of **Mental Drink**, an independent game studio creating original games and experimental technology.
 
 🎮 **Mental Drink Games**
-[Steam Link](https://store.steampowered.com/search/?developer=Mental%20Drink)
+[Steam Link](https://store.steampowered.com/search/?publisher=Mental%20Drink)
 
 ---
 
