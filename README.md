@@ -129,7 +129,6 @@ If you want Chaos to completely ignore the object, set the Collision Profile to:
 
 ![No Collision Setting](https://github.com/user-attachments/assets/b40c395d-887e-4d4d-8fa0-8e190cb88c42)
 
-![Uploading box3d_test.gif…]()
 ![Collision Example](https://github.com/user-attachments/assets/760fb108-8c4b-4125-8a48-61d3dc4268a7)
 
 ---
@@ -222,7 +221,7 @@ https://www.linkedin.com/in/antoniolattanzio/
 [Steam Link](https://store.steampowered.com/app/2470010/DEFECT/)
 
 🎮 **Mental Drink Games**
-[Steam Link](https://store.steampowered.com/search/?developer=Mental%20Drink)
+[Steam Link](https://store.steampowered.com/search/?publisher=Mental%20Drink)
 
 ---
 
