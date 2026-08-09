@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Box3DEventTypes.h"
 #include "Box3DQueryTypes.h"
 #include "HAL/IConsoleManager.h"
 #include "Subsystems/WorldSubsystem.h"
@@ -49,15 +50,43 @@ public:
 	b3WorldId GetWorldId() const { return WorldId; }
 	bool IsWorldValid() const { return bWorldValid; }
 
-	/** True where box3d simulates: Standalone and servers, never a pure client. */
+	/** True where box3d simulates: Standalone and servers, never a pure client. Gate any
+	 *  Blueprint that reads box3d state on this - on a client everything comes back empty. */
+	UFUNCTION(BlueprintPure, Category = "Box3D")
 	bool IsSimulationAuthority() const { return bIsAuthority; }
 
-	/** Monotonic count of fixed steps taken since world create - the deterministic timeline a
-	 *  rollback aligns to (doc §11b). Same step count from the same start gives the same state. */
+	/** Fixed steps taken since the world was created. Same count from the same start gives
+	 *  the same state, so this is the timeline a rollback aligns to. */
+	UFUNCTION(BlueprintPure, Category = "Box3D")
 	int64 GetSimulationFrame() const { return SimulationFrame; }
 
+	/** World gravity in cm/s^2. */
+	UFUNCTION(BlueprintPure, Category = "Box3D")
+	FVector GetGravity() const;
+
+	/** Change world gravity, cm/s^2. Bodies already asleep stay put until disturbed. */
+	UFUNCTION(BlueprintCallable, Category = "Box3D")
+	void SetGravity(const FVector& NewGravity);
+
+	/**
+	 * Blast every dynamic body within Radius of Center, scaled by the shape area facing it.
+	 * Falloff is the extra distance it decays over past Radius; a negative ImpulsePerArea
+	 * implodes. Doesn't touch mesh shapes. Deterministic, so it is safe on a server.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Box3D|Physics")
+	void ApplyRadialImpulse(const FVector& Center, float Radius, float Falloff, float ImpulsePerArea,
+		const FBox3DQueryFilter& Filter);
+
+	/** Every hit in the world, once each - one place to hang impact audio or decals off.
+	 *  Per-body events live on UBox3DBodyComponent. */
+	UPROPERTY(BlueprintAssignable, Category = "Box3D|Events")
+	FBox3DHitSignature OnAnyBox3DHit;
+
+	/** Body-component hook: queue a sleep/wake for dispatch after the step loop. */
+	void QueueSleepEvent(UBox3DBodyComponent* Body, bool bAwake);
+
 	/** djb2 digest of every dynamic body's state (transform + velocity), for determinism /
-	 *  desync detection (doc §14). Bodies are folded in a stable order (owner path name) so the
+	 *  desync detection. Bodies are folded in a stable order (owner path name) so the
 	 *  same world hashes the same across runs. OutBodyCount reports how many contributed.
 	 *  NOTE: stable within one build/scenario; a cross-machine desync check additionally needs a
 	 *  shared body ordering (networked ids - a D2 concern). Zero if no world / no dynamic bodies. */
@@ -69,7 +98,7 @@ public:
 	void RegisterKinematicBody(UBox3DBodyComponent* Component);
 	void UnregisterBody(UBox3DBodyComponent* Component);
 
-	// --- Spatial queries (doc §11) --------------------------------------------------
+	// --- Spatial queries --------------------------------------------------
 	// All positions/extents are Unreal world space in cm; results come back the same way.
 	// Queries run against the box3d world, so they only return hits where box3d simulates:
 	// Standalone and servers. On a pure client there is no world and every query returns
@@ -116,6 +145,12 @@ protected:
 	void DestroyBox3DWorld();
 	void StepFixed(float DeltaTime);
 	void DebugDraw();
+
+	// Event pump (Box3DEvents.cpp). box3d overwrites its event buffers every step, so the
+	// drain runs inside the loop; dispatch waits until after it, when handlers are free to
+	// spawn, destroy or impulse anything.
+	void DrainStepEvents();
+	void DispatchPendingEvents();
 
 	// Master-switch plumbing. EnableSimulation builds the world, static geometry and
 	// (on a runtime toggle) any already-registered body; DisableSimulation tears them
@@ -182,9 +217,42 @@ private:
 	UPROPERTY(EditAnywhere, Category = "Box3D")
 	FVector Gravity = FVector(0.0, 0.0, -980.0);
 
+	/** How fast a collision has to be (cm/s) before it counts as a hit. Raise it to keep
+	 *  small settling taps quiet. */
+	UPROPERTY(EditAnywhere, Config, Category = "Box3D|Events", meta = (ClampMin = "0.0"))
+	float HitEventThreshold = 100.0f;
+
+	// Events drained per step, dispatched once the loop ends. UPROPERTY so what they point
+	// at stays reachable in between.
+	UPROPERTY(Transient)
+	TArray<FBox3DTouchEvent> PendingBeginContact;
+
+	UPROPERTY(Transient)
+	TArray<FBox3DTouchEvent> PendingEndContact;
+
+	UPROPERTY(Transient)
+	TArray<FBox3DTouchEvent> PendingBeginOverlap;
+
+	UPROPERTY(Transient)
+	TArray<FBox3DTouchEvent> PendingEndOverlap;
+
+	/** Up to two entries per collision, one for each side that asked for hits. */
+	UPROPERTY(Transient)
+	TArray<FBox3DHitEvent> PendingHits;
+
+	/** The same collisions, one entry each, for OnAnyBox3DHit. */
+	UPROPERTY(Transient)
+	TArray<FBox3DHitEvent> PendingWorldHits;
+
+	UPROPERTY(Transient)
+	TArray<FBox3DSleepEvent> PendingSleep;
+
+	UPROPERTY(Transient)
+	TArray<FBox3DSleepEvent> PendingWake;
+
 	/** Actors carrying this tag are bulk-registered as static box3d geometry on level
 	 *  load/stream-in - no per-actor UBox3DBodyComponent needed. None (default) disables
-	 *  the scan; the component-per-actor path stays primary (see doc §8). */
+	 *  the scan; the component-per-actor path stays primary. */
 	UPROPERTY(EditAnywhere, Config, Category = "Box3D|Bulk Static")
 	FName StaticGeometryTag = NAME_None;
 
@@ -198,7 +266,7 @@ private:
 
 	/** Pre-baked static collision assets to instantiate on world begin. Produced by the
 	 *  bake commandlet; unlike the tag-scan path these need no runtime cooking, so they are
-	 *  the packaged-build path for static geometry (doc §8, milestone 5). The material above
+	 *  the packaged-build path for static geometry. The material above
 	 *  (StaticGeometryFriction/Restitution) is applied to their shapes. Loaded on top of
 	 *  whatever bAutoDiscoverBakedCollision finds. */
 	UPROPERTY(EditAnywhere, Config, Category = "Box3D|Bulk Static")

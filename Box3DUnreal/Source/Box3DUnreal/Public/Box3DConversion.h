@@ -57,6 +57,19 @@ namespace Box3D
 		return FVector(V.x, -V.y, V.z);
 	}
 
+	/** Angular velocity / torque / angular impulse. These are pseudovectors, so the Y-negation
+	 *  reflection maps them like the quaternion's vector part: negate X and Z, not Y. No
+	 *  cm<->m scale here - apply any unit factor at the call site. */
+	FORCEINLINE b3Vec3 ToBox3DAngular(const FVector& V)
+	{
+		return b3Vec3{ static_cast<float>(-V.X), static_cast<float>(V.Y), static_cast<float>(-V.Z) };
+	}
+
+	FORCEINLINE FVector FromBox3DAngular(const b3Vec3& V)
+	{
+		return FVector(-V.x, V.y, -V.z);
+	}
+
 	FORCEINLINE b3Quat ToBox3DQuat(const FQuat& Q)
 	{
 		return b3Quat{

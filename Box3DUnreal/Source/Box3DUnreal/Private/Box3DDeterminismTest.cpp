@@ -1,6 +1,6 @@
 // Author: Antonio Lattanzio - emptyvessel
 
-// Self-contained determinism + snapshot tests (doc §14, D0/D1). These build raw box3d worlds
+// Self-contained determinism + snapshot tests (D0/D1). These build raw box3d worlds
 // directly - no subsystem, no actors, no player - so they prove the simulation's reproducibility
 // and the snapshot fidelity in isolation, and run headless in CI:
 //

@@ -6,7 +6,7 @@
 #include <box3d/box3d.h>
 
 // Per-body state capture / restore / hash: the foundation for determinism verification
-// (doc §14 D0) and client-side rollback (D2). box3d exposes no live-world serialize, so a
+// (D0) and client-side rollback (D2). box3d exposes no live-world serialize, so a
 // "snapshot" is the kinematic state of each body read back through the public getters.
 //
 // IMPORTANT (fidelity): this captures a body's transform + velocity + awake flag, NOT the

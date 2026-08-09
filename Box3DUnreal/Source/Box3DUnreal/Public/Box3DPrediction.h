@@ -6,7 +6,7 @@
 #include "Box3DSnapshot.h"
 #include <box3d/box3d.h>
 
-// Client-side prediction + rollback core (doc §11b, D2). Built on the D0/D1 foundation:
+// Client-side prediction + rollback core (D2). Built on the D0/D1 foundation:
 // determinism (a client re-simulating from an authoritative state reaches the same result the
 // server did) plus the per-body snapshot primitives in Box3DSnapshot.h.
 //
@@ -23,7 +23,7 @@ namespace Box3D
 	 * before the replay re-steps), so this stores every body's FBodyState per frame.
 	 *
 	 * Assumes a stable body set and order across frames - true for persistent bodies; spawn/despawn
-	 * mid-window is out of scope for this first cut (see doc §11b limitations).
+	 * mid-window is out of scope for this first cut.
 	 */
 	class BOX3DUNREAL_API FSnapshotRing
 	{

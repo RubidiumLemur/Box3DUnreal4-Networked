@@ -6,7 +6,7 @@
 #include "Box3DSubsystem.h"
 #include "GameFramework/Actor.h"
 
-// Spatial queries against the box3d world (doc §11). box3d owns the collision data for
+// Spatial queries against the box3d world. box3d owns the collision data for
 // driven actors, so these answer against the authoritative sim rather than Chaos.
 
 namespace

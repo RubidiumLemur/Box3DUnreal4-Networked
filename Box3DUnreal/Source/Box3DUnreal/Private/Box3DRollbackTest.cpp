@@ -1,6 +1,6 @@
 // Author: Antonio Lattanzio - emptyvessel
 
-// Self-contained proof of the rollback/reconciliation algorithm (doc §11b, D2). No actors, no
+// Self-contained proof of the rollback/reconciliation algorithm (D2). No actors, no
 // network - two raw box3d worlds model a server and a predicting client:
 //
 //   1. Both run the same deterministic scene, so with no events they stay in lockstep (D0).

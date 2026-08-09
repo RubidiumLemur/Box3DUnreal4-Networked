@@ -1,6 +1,6 @@
 // Author: Antonio Lattanzio - emptyvessel
 
-// Self-checking smoke test for the spatial queries (doc §11). Needs no player and no
+// Self-checking smoke test for the spatial queries. Needs no player and no
 // authored level content: it spawns a known static cube far above the level, fires
 // axis-aligned rays at it, and checks each hit lands on the expected face.
 //

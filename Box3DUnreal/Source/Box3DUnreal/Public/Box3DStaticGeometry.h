@@ -8,9 +8,9 @@
 class AActor;
 struct FBox3DBakedBody;
 
-// Extracts UE cooked collision into box3d static shapes. See the integration doc §8.
+// Extracts UE cooked collision into box3d static shapes.
 //
-// Two stages, shared by the live and baked paths (doc milestone 5):
+// Two stages, shared by the live and baked paths (milestone 5):
 //   1. Extract  - UE cooked collision -> plain FBox3DBakedBody (box3d-space buffers).
 //                 Editor/PIE only (GetPhysicsTriMeshData needs CPU-side collision).
 //   2. Instantiate - FBox3DBakedBody -> box3d shapes on a body. Any platform.

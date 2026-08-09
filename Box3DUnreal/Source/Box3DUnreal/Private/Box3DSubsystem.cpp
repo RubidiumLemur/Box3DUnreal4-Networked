@@ -210,13 +210,14 @@ void UBox3DSubsystem::CreateBox3DWorld()
 
 	b3WorldDef Def = b3DefaultWorldDef();
 	Def.gravity = Box3D::ToBox3DVector(Gravity);
+	Def.hitEventThreshold = HitEventThreshold * static_cast<float>(Box3D::UnrealToMeters);
 
 	// Pin the worker count. box3d's built-in scheduler re-partitions the constraint graph by
 	// worker count, so >1 is not reproducible across peers (the headers call replaying at a
 	// different count a "cross-thread determinism test"). 1 = serial, the deterministic path a
-	// server-authoritative sim and any future rollback rely on (doc §10, §14). It is also the
-	// box3d default today (workerCount 0 -> serial fallback) - setting it explicitly stops a
-	// later "enable workers for perf" from silently breaking determinism.
+	// server-authoritative sim and any future rollback rely on. It is also box3d's default
+	// today (workerCount 0 -> serial fallback) - setting it explicitly stops a later "enable
+	// workers for perf" from silently breaking determinism.
 	Def.workerCount = static_cast<uint32>(FMath::Max(1, WorkerCount));
 
 	WorldId = b3CreateWorld(&Def);
@@ -275,6 +276,16 @@ void UBox3DSubsystem::DestroyBox3DWorld()
 	WorldId = b3_nullWorldId;
 	bWorldValid = false;
 	Accumulator = 0.0;
+
+	// Any pending event points at a body that is gone now. Drop them.
+	PendingBeginContact.Reset();
+	PendingEndContact.Reset();
+	PendingBeginOverlap.Reset();
+	PendingEndOverlap.Reset();
+	PendingHits.Reset();
+	PendingWorldHits.Reset();
+	PendingSleep.Reset();
+	PendingWake.Reset();
 }
 
 void UBox3DSubsystem::OnLevelAddedToWorld(ULevel* Level, UWorld* World)
@@ -315,7 +326,7 @@ void UBox3DSubsystem::RegisterLevelStaticGeometry(ULevel* Level)
 	}
 
 	// Deterministic creation order: streaming completion order is not stable, but body
-	// creation order affects island assignment / reproducibility (doc §8). Sort by the
+	// creation order affects island assignment / reproducibility. Sort by the
 	// stable full path name.
 	Tagged.Sort([](const AActor& A, const AActor& B) { return A.GetPathName() < B.GetPathName(); });
 
@@ -540,6 +551,43 @@ void UBox3DSubsystem::LoadBakedStaticGeometry()
 	}
 }
 
+FVector UBox3DSubsystem::GetGravity() const
+{
+	return bWorldValid ? Box3D::FromBox3DVector(b3World_GetGravity(WorldId)) : Gravity;
+}
+
+void UBox3DSubsystem::SetGravity(const FVector& NewGravity)
+{
+	Gravity = NewGravity; // kept so a rebuild after a box3d.Enabled toggle picks it up
+	if (bWorldValid)
+	{
+		b3World_SetGravity(WorldId, Box3D::ToBox3DVector(NewGravity));
+	}
+}
+
+void UBox3DSubsystem::ApplyRadialImpulse(const FVector& Center, float Radius, float Falloff,
+	float ImpulsePerArea, const FBox3DQueryFilter& Filter)
+{
+	if (!bWorldValid)
+	{
+		return; // client, or box3d disabled
+	}
+
+	b3ExplosionDef Def = b3DefaultExplosionDef();
+	Def.position = Box3D::ToBox3DPosition(Center);
+	Def.radius = Radius * static_cast<float>(Box3D::UnrealToMeters);
+	Def.falloff = Falloff * static_cast<float>(Box3D::UnrealToMeters);
+	// Passed straight through: it scales with exposed shape area, so there is no single
+	// cm<->m factor to fold in. Tune it against the sim.
+	Def.impulsePerArea = ImpulsePerArea;
+	if (Filter.Mask != 0)
+	{
+		Def.maskBits = static_cast<uint64>(static_cast<uint32>(Filter.Mask));
+	}
+
+	b3World_Explode(WorldId, &Def);
+}
+
 void UBox3DSubsystem::RegisterBody(UBox3DBodyComponent* Component)
 {
 	if (Component != nullptr)
@@ -593,6 +641,10 @@ void UBox3DSubsystem::Tick(float DeltaTime)
 	{
 		StepFixed(DeltaTime);
 	}
+
+	// After the step loop and the write-back, so handlers see final poses and can mutate
+	// the world without landing between two fixed steps.
+	DispatchPendingEvents();
 
 	// Debug draw only while box3d is enabled - a disabled sim leaves no bodies to show,
 	// so the wireframes/counter must vanish too (else it looks like it's still running).
@@ -708,7 +760,9 @@ void UBox3DSubsystem::StepFixed(float DeltaTime)
 
 		b3World_Step(WorldId, FixedTimeStep, SubStepCount);
 		Accumulator -= FixedTimeStep;
-		++SimulationFrame; // monotonic fixed-step index: the timeline a rollback tags against (§11b)
+		++SimulationFrame; // the timeline a rollback tags against
+
+		DrainStepEvents(); // per step: box3d overwrites its buffers on the next one
 
 		for (int32 Index = DynamicBodies.Num() - 1; Index >= 0; --Index)
 		{

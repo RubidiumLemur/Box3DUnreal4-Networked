@@ -27,10 +27,15 @@ namespace
 			static_cast<float>(V.Z * Scale.Z * Box3D::UnrealToMeters) };
 	}
 
-	// Gather the mesh's simple convex/box collision as box3d-space point clouds, one per
-	// element. Scale is baked in (box3d shapes carry none). Convex hulls from render verts
-	// are wrong; this uses the cooked simple collision (doc §7).
-	void GatherConvexPointClouds(UPrimitiveComponent* Prim, const FVector& Scale, TArray<TArray<b3Vec3>>& OutClouds)
+	// Gather one primitive's simple convex/box collision as box3d-space point clouds, one
+	// per element. Convex hulls from render verts are wrong; this uses the cooked simple
+	// collision.
+	//
+	// SourceToRoot places the primitive's unscaled local space into the root's unscaled
+	// local space (identity for the root itself); RootScale is then baked in, since box3d
+	// shapes carry no scale.
+	void GatherPrimitiveClouds(UPrimitiveComponent* Prim, const FTransform& SourceToRoot,
+		const FVector& RootScale, TArray<TArray<b3Vec3>>& OutClouds)
 	{
 		UBodySetup* Setup = Prim ? Prim->GetBodySetup() : nullptr;
 		if (Setup == nullptr)
@@ -52,7 +57,7 @@ namespace
 			Cloud.Reserve(Convex.VertexData.Num());
 			for (const FVector& V : Convex.VertexData)
 			{
-				Cloud.Add(ConvexLocalToBox3D(ElemTM.TransformPosition(V), Scale));
+				Cloud.Add(ConvexLocalToBox3D(SourceToRoot.TransformPosition(ElemTM.TransformPosition(V)), RootScale));
 			}
 		}
 
@@ -67,8 +72,51 @@ namespace
 			for (int32 Sy = -1; Sy <= 1; Sy += 2)
 			for (int32 Sz = -1; Sz <= 1; Sz += 2)
 			{
-				Cloud.Add(ConvexLocalToBox3D(ElemTM.TransformPosition(FVector(Sx * He.X, Sy * He.Y, Sz * He.Z)), Scale));
+				const FVector Corner(Sx * He.X, Sy * He.Y, Sz * He.Z);
+				Cloud.Add(ConvexLocalToBox3D(SourceToRoot.TransformPosition(ElemTM.TransformPosition(Corner)), RootScale));
 			}
+		}
+	}
+
+	// Collect the root's clouds and, when bIncludeChildren, every attached primitive
+	// descendant's as well - the compound case (e.g. a group of fracture pieces simulated
+	// as one body). The root may be a bare USceneComponent, which contributes no geometry
+	// of its own but gives the compound a stable pivot that outlives any single piece.
+	void GatherConvexPointClouds(USceneComponent* Root, bool bIncludeChildren,
+		TArray<TArray<b3Vec3>>& OutClouds)
+	{
+		if (Root == nullptr)
+		{
+			return;
+		}
+
+		const FVector RootScale = Root->GetComponentScale();
+		if (UPrimitiveComponent* RootPrim = Cast<UPrimitiveComponent>(Root))
+		{
+			GatherPrimitiveClouds(RootPrim, FTransform::Identity, RootScale, OutClouds);
+		}
+
+		if (!bIncludeChildren)
+		{
+			return;
+		}
+
+		TArray<USceneComponent*> Children;
+		Root->GetChildrenComponents(/*bIncludeAllDescendants=*/true, Children);
+
+		const FTransform RootTM = Root->GetComponentTransform();
+		for (USceneComponent* Child : Children)
+		{
+			UPrimitiveComponent* ChildPrim = Cast<UPrimitiveComponent>(Child);
+			if (ChildPrim == nullptr || ChildPrim->GetCollisionEnabled() == ECollisionEnabled::NoCollision)
+			{
+				continue;
+			}
+			// Relative transform divides out the root's scale, so the result is in the
+			// root's UNSCALED local space - exactly what GatherPrimitiveClouds expects
+			// before it bakes RootScale.
+			GatherPrimitiveClouds(ChildPrim, ChildPrim->GetComponentTransform().GetRelativeTransform(RootTM),
+				RootScale, OutClouds);
 		}
 	}
 } // namespace
@@ -94,11 +142,13 @@ void UBox3DBodyComponent::BeginPlay()
 	// fallback box used when the mesh has no simple convex collision.
 	if (Shape == EBox3DShape::Box)
 	{
+		// Author-specified extents are centred on the body origin by definition.
 		ResolvedHalfExtent = BoxHalfExtent.GetAbs();
+		ResolvedBoxCenter = FVector::ZeroVector;
 	}
 	else if (Shape == EBox3DShape::Auto || Shape == EBox3DShape::Convex)
 	{
-		ResolvedHalfExtent = ComputeAutoBoxHalfExtent();
+		ResolveAutoBoxBounds();
 	}
 
 	// Cache the convex wireframe on both server and client so both can draw the shape.
@@ -164,6 +214,14 @@ void UBox3DBodyComponent::RebuildSimulationBody()
 		return;
 	}
 
+	if (bIsSensor && BodyType == EBox3DBodyType::Dynamic)
+	{
+		UE_LOG(LogBox3D, Warning,
+			TEXT("%s: a trigger never collides, so this Dynamic body will fall through the level. ")
+			TEXT("Use Static or Kinematic."),
+			*GetNameSafe(GetOwner()));
+	}
+
 	AddShape();
 
 	// Dynamic and kinematic both move at runtime and must stream to clients. The
@@ -178,12 +236,228 @@ void UBox3DBodyComponent::RebuildSimulationBody()
 		if (BodyType == EBox3DBodyType::Dynamic)
 		{
 			Subsystem->RegisterDynamicBody(this);   // box3d writes the actor each step
+
+			// Flush any force/velocity requested before the body existed.
+			if (!PendingLinearImpulse.IsNearlyZero())
+			{
+				AddImpulse(PendingLinearImpulse, /*bWake=*/true);
+				PendingLinearImpulse = FVector::ZeroVector;
+			}
+			if (bHasPendingAngularVelocity)
+			{
+				SetAngularVelocity(PendingAngularVelocity, /*bWake=*/true);
+				bHasPendingAngularVelocity = false;
+			}
 		}
 		else
 		{
 			Subsystem->RegisterKinematicBody(this); // gameplay pose pushed in each step
 		}
 	}
+}
+
+void UBox3DBodyComponent::AddImpulse(const FVector& Impulse, bool bWake)
+{
+	if (BodyType != EBox3DBodyType::Dynamic)
+	{
+		return;
+	}
+	if (B3_IS_NULL(BodyId))
+	{
+		PendingLinearImpulse += Impulse; // apply once the body is built
+		return;
+	}
+	b3Body_ApplyLinearImpulseToCenter(BodyId, Box3D::ToBox3DVector(Impulse), bWake);
+}
+
+void UBox3DBodyComponent::AddImpulseAtLocation(const FVector& Impulse, const FVector& WorldLocation, bool bWake)
+{
+	if (BodyType != EBox3DBodyType::Dynamic || B3_IS_NULL(BodyId))
+	{
+		return; // not queued: the world point would be stale by the time the body exists
+	}
+	b3Body_ApplyLinearImpulse(BodyId, Box3D::ToBox3DVector(Impulse),
+		Box3D::ToBox3DPosition(WorldLocation), bWake);
+}
+
+void UBox3DBodyComponent::AddForce(const FVector& Force, bool bWake)
+{
+	if (BodyType != EBox3DBodyType::Dynamic || B3_IS_NULL(BodyId))
+	{
+		return; // not queued: a force lasts one step, so it would land at the wrong time
+	}
+	b3Body_ApplyForceToCenter(BodyId, Box3D::ToBox3DVector(Force), bWake);
+}
+
+void UBox3DBodyComponent::AddTorque(const FVector& Torque, bool bWake)
+{
+	if (BodyType != EBox3DBodyType::Dynamic || B3_IS_NULL(BodyId))
+	{
+		return;
+	}
+	// N*m = kg*m^2/s^2, so the cm->m factor applies twice.
+	constexpr float TorqueToBox3D = static_cast<float>(Box3D::UnrealToMeters * Box3D::UnrealToMeters);
+	b3Body_ApplyTorque(BodyId, b3MulSV(TorqueToBox3D, Box3D::ToBox3DAngular(Torque)), bWake);
+}
+
+void UBox3DBodyComponent::AddAngularImpulse(const FVector& AngularImpulse, bool bWake)
+{
+	if (BodyType != EBox3DBodyType::Dynamic || B3_IS_NULL(BodyId))
+	{
+		return;
+	}
+	// Same squared length factor as torque.
+	constexpr float ImpulseToBox3D = static_cast<float>(Box3D::UnrealToMeters * Box3D::UnrealToMeters);
+	b3Body_ApplyAngularImpulse(BodyId, b3MulSV(ImpulseToBox3D, Box3D::ToBox3DAngular(AngularImpulse)), bWake);
+}
+
+void UBox3DBodyComponent::SetLinearVelocity(const FVector& Velocity, bool bWake)
+{
+	if (BodyType != EBox3DBodyType::Dynamic || B3_IS_NULL(BodyId))
+	{
+		return;
+	}
+	b3Body_SetLinearVelocity(BodyId, Box3D::ToBox3DVector(Velocity));
+	if (bWake)
+	{
+		b3Body_SetAwake(BodyId, true);
+	}
+}
+
+void UBox3DBodyComponent::SetAngularVelocity(const FVector& AngularVelocity, bool bWake)
+{
+	if (BodyType != EBox3DBodyType::Dynamic)
+	{
+		return;
+	}
+	if (B3_IS_NULL(BodyId))
+	{
+		PendingAngularVelocity = AngularVelocity;
+		bHasPendingAngularVelocity = true;
+		return;
+	}
+	// Axial, and rad/s is scale-free - no cm<->m factor here.
+	b3Body_SetAngularVelocity(BodyId, Box3D::ToBox3DAngular(AngularVelocity));
+	if (bWake)
+	{
+		b3Body_SetAwake(BodyId, true);
+	}
+}
+
+void UBox3DBodyComponent::SetGravityScale(float Scale)
+{
+	if (B3_IS_NON_NULL(BodyId))
+	{
+		b3Body_SetGravityScale(BodyId, Scale);
+		b3Body_SetAwake(BodyId, true); // a resting body would ignore the change
+	}
+}
+
+void UBox3DBodyComponent::SetSleepEnabled(bool bEnabled)
+{
+	if (B3_IS_NON_NULL(BodyId))
+	{
+		b3Body_EnableSleep(BodyId, bEnabled);
+	}
+}
+
+void UBox3DBodyComponent::TeleportBody(const FVector& Location, const FRotator& Rotation)
+{
+	if (B3_IS_NULL(BodyId))
+	{
+		return;
+	}
+
+	const FQuat Quat = Rotation.Quaternion();
+	b3Body_SetTransform(BodyId, Box3D::ToBox3DPosition(Location), Box3D::ToBox3DQuat(Quat));
+	b3Body_SetLinearVelocity(BodyId, b3Vec3_zero);
+	b3Body_SetAngularVelocity(BodyId, b3Vec3_zero);
+	b3Body_SetAwake(BodyId, true);
+
+	// Collapse both interpolation endpoints onto the new pose, or the next frame blends
+	// from the old one and the actor slides across the level.
+	PrevTransform = CurrTransform = FTransform(Quat, Location, SpawnScale);
+	GetOwner()->SetActorLocationAndRotation(Location, Quat, /*bSweep=*/false, nullptr, ETeleportType::TeleportPhysics);
+}
+
+FVector UBox3DBodyComponent::GetLinearVelocity() const
+{
+	if (B3_IS_NULL(BodyId))
+	{
+		return FVector::ZeroVector;
+	}
+	return Box3D::FromBox3DVector(b3Body_GetLinearVelocity(BodyId));
+}
+
+FVector UBox3DBodyComponent::GetAngularVelocity() const
+{
+	if (B3_IS_NULL(BodyId))
+	{
+		return FVector::ZeroVector;
+	}
+	return Box3D::FromBox3DAngular(b3Body_GetAngularVelocity(BodyId));
+}
+
+float UBox3DBodyComponent::GetBodyMass() const
+{
+	return B3_IS_NULL(BodyId) ? 0.0f : b3Body_GetMass(BodyId);
+}
+
+bool UBox3DBodyComponent::IsBodyAwake() const
+{
+	return B3_IS_NON_NULL(BodyId) && b3Body_IsAwake(BodyId);
+}
+
+void UBox3DBodyComponent::WakeBody()
+{
+	if (B3_IS_NON_NULL(BodyId))
+	{
+		b3Body_SetAwake(BodyId, true);
+	}
+}
+
+void UBox3DBodyComponent::RebuildShapes()
+{
+	if (B3_IS_NULL(BodyId))
+	{
+		return;
+	}
+
+	const int32 Count = b3Body_GetShapeCount(BodyId);
+	if (Count > 0)
+	{
+		TArray<b3ShapeId> Shapes;
+		Shapes.SetNumUninitialized(Count);
+		const int32 Fetched = b3Body_GetShapes(BodyId, Shapes.GetData(), Count);
+		for (int32 i = 0; i < Fetched; ++i)
+		{
+			// Defer the mass update to the single ApplyMassFromShapes below.
+			b3DestroyShape(Shapes[i], /*updateBodyMass=*/false);
+		}
+	}
+
+	// Static bodies may hold tri-mesh data referenced by the shapes we just destroyed.
+	for (b3MeshData* Mesh : OwnedMeshes)
+	{
+		if (Mesh != nullptr)
+		{
+			b3DestroyMesh(Mesh);
+		}
+	}
+	OwnedMeshes.Reset();
+
+	if (Shape == EBox3DShape::Auto || Shape == EBox3DShape::Convex)
+	{
+		ResolveAutoBoxBounds();
+	}
+	if (Shape == EBox3DShape::Convex)
+	{
+		BuildConvexDebugGeometry();
+	}
+
+	AddShape();
+	b3Body_ApplyMassFromShapes(BodyId);
+	b3Body_SetAwake(BodyId, true);
 }
 
 void UBox3DBodyComponent::TeardownSimulationBody()
@@ -260,6 +534,7 @@ void UBox3DBodyComponent::CreateBody()
 	Def.userData = GetOwner();
 
 	BodyId = b3CreateBody(Subsystem->GetWorldId(), &Def);
+	bWasAwake = true; // bodies are created awake
 }
 
 void UBox3DBodyComponent::AddShape()
@@ -269,6 +544,16 @@ void UBox3DBodyComponent::AddShape()
 	ShapeDef.baseMaterial.friction = Friction;
 	ShapeDef.baseMaterial.restitution = Restitution;
 	ShapeDef.baseMaterial.rollingResistance = RollingResistance;
+
+	// Lets an event resolve its shape back to this component. Safe for the same reason the
+	// body's actor pointer is: the shapes die with the body in DestroyBody.
+	ShapeDef.userData = this;
+
+	// A trigger with overlaps off would report nothing, so force it on there.
+	ShapeDef.isSensor = bIsSensor;
+	ShapeDef.enableSensorEvents = bIsSensor || bGenerateSensorEvents;
+	ShapeDef.enableContactEvents = bGenerateContactEvents;
+	ShapeDef.enableHitEvents = bGenerateHitEvents;
 
 	// Opt-in collision filtering; 0/0/0 leaves the default (collide with everything).
 	if (CollisionCategory != 0 || CollisionMask != 0 || CollisionGroup != 0)
@@ -328,19 +613,25 @@ void UBox3DBodyComponent::AddShape()
 			break;
 		}
 		UE_LOG(LogBox3D, Warning,
-			TEXT("%s: Convex shape found no simple convex collision; falling back to a box. ")
-			TEXT("Add convex simple collision to the mesh, or use a different shape."),
+			TEXT("%s: Convex shape resolved no usable hull from the root's simple collision; ")
+			TEXT("falling back to a bounds box. Add convex simple collision to the mesh (a hull ")
+			TEXT("needs 4+ non-coplanar verts), or use a different shape."),
 			*GetNameSafe(GetOwner()));
-		const b3BoxHull FallbackHull = b3MakeBoxHull(
-			ResolvedHalfExtent.X * M, ResolvedHalfExtent.Y * M, ResolvedHalfExtent.Z * M);
+		// Offset, not b3MakeBoxHull: ResolvedBoxCenter puts the box on the mesh rather
+		// than on the component pivot, which they only share when the mesh is centred.
+		const b3BoxHull FallbackHull = b3MakeOffsetBoxHull(
+			ResolvedHalfExtent.X * M, ResolvedHalfExtent.Y * M, ResolvedHalfExtent.Z * M,
+			Box3D::ToBox3DVector(ResolvedBoxCenter));
 		b3CreateHullShape(BodyId, &ShapeDef, &FallbackHull.base);
 		break;
 	}
 	default: // Auto / Box
 	{
-		// ResolvedHalfExtent was computed in BeginPlay (also used by debug draw).
-		const b3BoxHull Hull = b3MakeBoxHull(
-			ResolvedHalfExtent.X * M, ResolvedHalfExtent.Y * M, ResolvedHalfExtent.Z * M);
+		// ResolvedHalfExtent / ResolvedBoxCenter were resolved in BeginPlay (also used
+		// by debug draw). The centre is zero for an explicit Box.
+		const b3BoxHull Hull = b3MakeOffsetBoxHull(
+			ResolvedHalfExtent.X * M, ResolvedHalfExtent.Y * M, ResolvedHalfExtent.Z * M,
+			Box3D::ToBox3DVector(ResolvedBoxCenter));
 		b3CreateHullShape(BodyId, &ShapeDef, &Hull.base);
 		break;
 	}
@@ -349,14 +640,8 @@ void UBox3DBodyComponent::AddShape()
 
 bool UBox3DBodyComponent::AddConvexShapes(const b3ShapeDef& ShapeDef)
 {
-	UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(GetOwner()->GetRootComponent());
-	if (Prim == nullptr)
-	{
-		return false;
-	}
-
 	TArray<TArray<b3Vec3>> Clouds;
-	GatherConvexPointClouds(Prim, Prim->GetComponentScale(), Clouds);
+	GatherConvexPointClouds(GetOwner()->GetRootComponent(), bConvexIncludesAttachedChildren, Clouds);
 
 	// One hull shape per element (a compound), matching the mesh's simple collision.
 	int32 Created = 0;
@@ -383,14 +668,8 @@ void UBox3DBodyComponent::BuildConvexDebugGeometry()
 {
 	ConvexDebugSegments.Reset();
 
-	UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(GetOwner()->GetRootComponent());
-	if (Prim == nullptr)
-	{
-		return;
-	}
-
 	TArray<TArray<b3Vec3>> Clouds;
-	GatherConvexPointClouds(Prim, Prim->GetComponentScale(), Clouds);
+	GatherConvexPointClouds(GetOwner()->GetRootComponent(), bConvexIncludesAttachedChildren, Clouds);
 
 	// Rebuild each hull just to read back its computed edges - b3CreateHull is a standalone
 	// utility (no world), so this runs on clients too. Emit each undirected edge once by
@@ -468,23 +747,54 @@ void UBox3DBodyComponent::EnforceAuthorityContract()
 	}
 }
 
-FVector UBox3DBodyComponent::ComputeAutoBoxHalfExtent() const
+void UBox3DBodyComponent::ResolveAutoBoxBounds()
 {
-	if (const UPrimitiveComponent* Root = Cast<UPrimitiveComponent>(GetOwner()->GetRootComponent()))
+	ResolvedHalfExtent = FVector(50.0, 50.0, 50.0);
+	ResolvedBoxCenter = FVector::ZeroVector;
+
+	USceneComponent* Root = GetOwner()->GetRootComponent();
+	if (Root != nullptr)
 	{
 		// Local-space bounds (Identity transform) times the component scale gives
 		// axis-aligned half-extents in the actor's frame, independent of rotation.
-		const FBoxSphereBounds LocalBounds = Root->CalcBounds(FTransform::Identity);
-		const FVector Extent = LocalBounds.BoxExtent * Root->GetComponentScale();
-		if (!Extent.IsNearlyZero())
+		const FVector Scale = Root->GetComponentScale();
+		const FTransform RootTM = Root->GetComponentTransform();
+
+		FBox Local(ForceInit);
+		if (const UPrimitiveComponent* RootPrim = Cast<UPrimitiveComponent>(Root))
 		{
-			return Extent;
+			Local += RootPrim->CalcBounds(FTransform::Identity).GetBox();
+		}
+
+		// A compound (or a bare scene root) gets its extent from the attached
+		// primitives - without this the box would collapse to a point.
+		if (bConvexIncludesAttachedChildren || !Root->IsA<UPrimitiveComponent>())
+		{
+			TArray<USceneComponent*> Children;
+			Root->GetChildrenComponents(/*bIncludeAllDescendants=*/true, Children);
+			for (USceneComponent* Child : Children)
+			{
+				if (const UPrimitiveComponent* ChildPrim = Cast<UPrimitiveComponent>(Child))
+				{
+					Local += ChildPrim->CalcBounds(ChildPrim->GetComponentTransform().GetRelativeTransform(RootTM)).GetBox();
+				}
+			}
+		}
+
+		if (Local.IsValid && !Local.GetExtent().IsNearlyZero())
+		{
+			ResolvedHalfExtent = Local.GetExtent() * Scale;
+			// Geometry is not always centred on its own component origin - fracture
+			// pieces keep their verts in the source actor's space, so the mesh sits
+			// metres away from the origin. Carry that offset or the box lands on the
+			// pivot instead of on the mesh.
+			ResolvedBoxCenter = Local.GetCenter() * Scale;
+			return;
 		}
 	}
 
 	UE_LOG(LogBox3D, Warning, TEXT("%s: could not derive Auto bounds; using 50cm default."),
 		*GetNameSafe(GetOwner()));
-	return FVector(50.0, 50.0, 50.0);
 }
 
 void UBox3DBodyComponent::CaptureStepTransform()
@@ -492,6 +802,17 @@ void UBox3DBodyComponent::CaptureStepTransform()
 	if (B3_IS_NULL(BodyId))
 	{
 		return;
+	}
+
+	// box3d has no wake event, so poll it here - we already visit every body each step.
+	if (bGenerateSleepEvents)
+	{
+		const bool bAwake = b3Body_IsAwake(BodyId);
+		if (bAwake != bWasAwake)
+		{
+			bWasAwake = bAwake;
+			Subsystem->QueueSleepEvent(this, bAwake);
+		}
 	}
 
 	FTransform NewXform = Box3D::FromBox3DTransform(b3Body_GetTransform(BodyId));
@@ -579,11 +900,13 @@ void UBox3DBodyComponent::DrawDebug() const
 		}
 		else // no convex collision resolved; the shape fell back to a box
 		{
-			DrawDebugBox(World, Location, ResolvedHalfExtent, Rotation, Color, false, -1.0f, 0, 1.0f);
+			DrawDebugBox(World, Location + Rotation.RotateVector(ResolvedBoxCenter),
+				ResolvedHalfExtent, Rotation, Color, false, -1.0f, 0, 1.0f);
 		}
 		break;
 	default: // Auto / Box
-		DrawDebugBox(World, Location, ResolvedHalfExtent, Rotation, Color, false, -1.0f, 0, 1.0f);
+		DrawDebugBox(World, Location + Rotation.RotateVector(ResolvedBoxCenter),
+			ResolvedHalfExtent, Rotation, Color, false, -1.0f, 0, 1.0f);
 		break;
 	}
 }

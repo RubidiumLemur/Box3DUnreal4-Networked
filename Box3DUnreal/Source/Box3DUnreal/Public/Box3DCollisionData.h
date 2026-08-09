@@ -8,7 +8,7 @@
 // Baked static collision: UE cooked collision already converted into box3d local
 // space (meters, scale baked, Y negated, winding fixed). Saved once in the editor
 // so packaged builds never runtime-cook tri-meshes (GetPhysicsTriMeshData is
-// editor/PIE-reliable only). See the integration doc §5, §8, milestone 5.
+// editor/PIE-reliable only).
 
 // One shape's kind. Mirrors what the extraction produces; the loader switches on it.
 UENUM()

@@ -284,7 +284,7 @@ namespace
 		TEXT("Sphere-overlap the box3d world around the player (default radius 500cm) and list the actors."),
 		FConsoleCommandWithWorldAndArgsDelegate::CreateStatic(&QueryOverlap));
 
-	// Print the live world's state hash (doc §14). Run it on server and client with the sim paused
+	// Print the live world's state hash. Run it on server and client with the sim paused
 	// (pause box3d.Enabled or the game) to eyeball a desync; the number is stable for a given build
 	// and scenario. Cross-machine comparison still needs a shared body ordering (a D2 concern).
 	void HashState(UWorld* World)
