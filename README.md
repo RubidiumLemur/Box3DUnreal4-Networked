@@ -33,10 +33,12 @@ The goal of this project is to provide a clean and lightweight Unreal-friendly i
 
 * Box3D integrated into Unreal Engine 5
 * Unreal Engine plugin architecture
-* C++ API
+* C++ and Blueprint API
+* Physics events for designers: hit, contact, overlap, sleep/wake
 * Box3D world and simulation support
 * Lightweight integration layer
 * Static mesh simulation support
+* Raycasts, overlaps and shape casts against the Box3D world
 
 More features and examples will be added as the project evolves.
 
@@ -126,6 +128,53 @@ If you want Chaos to completely ignore the object, set the Collision Profile to:
 
 ---
 
+## Physics Events
+
+Events work the same way they do in Chaos: tick a checkbox on the **Box3DBody Component**,
+then bind the matching event in the actor's Blueprint graph.
+
+| Checkbox | Events |
+| --- | --- |
+| **Simulation Generates Hit Events** | `On Box3D Hit` |
+| **Generate Contact Events** | `On Box3D Begin Contact` / `On Box3D End Contact` |
+| **Generate Overlap Events** | `On Box3D Begin Overlap` / `On Box3D End Overlap` |
+| **Is Trigger** | turns the body into a trigger volume (never blocks) |
+| **Generate Sleep Events** | `On Box3D Sleep` / `On Box3D Wake` |
+
+**Hit** is the one most gameplay wants. It only fires for collisions above a speed threshold
+and carries the impact location, normal and closing speed, so you can scale damage, sound or
+decals by how hard the impact was. **Contact** fires for every touch however gentle — use it
+only when the touch itself is the point.
+
+Two things behave differently from Chaos, both inherited from Box3D:
+
+* **Hit and contact only need the checkbox on one of the two bodies.** A prop can hear about
+  hitting level geometry that has no events of its own.
+* **Overlap needs it on both.** A trigger is blind to anything without *Generate Overlap
+  Events*, so tick it on the trigger *and* on whatever should be detected. A trigger should be
+  Static or Kinematic — a Dynamic one never collides, so it just falls out of the level.
+
+Events fire on the server only, since only the server simulates. Replicate the reaction, not
+the event.
+
+For a single handler that hears every impact in the level (impact audio, decals), bind
+`On Any Box3D Hit` on the **Box3D Subsystem** instead.
+
+---
+
+## Blueprint API
+
+The body component exposes the usual physics verbs: `Add Impulse`, `Add Impulse At Location`,
+`Add Force`, `Add Torque`, `Add Angular Impulse`, `Set`/`Get Linear Velocity`,
+`Set`/`Get Angular Velocity`, `Set Gravity Scale`, `Set Sleep Enabled`, `Teleport Body`,
+`Get Body Mass`, `Is Body Awake`, `Wake Body`.
+
+The subsystem exposes the world: raycasts, overlaps and shape casts, `Get`/`Set Gravity`,
+`Apply Radial Impulse`, plus `Is Simulation Authority` — check that before trusting any
+Box3D state, because a client has no bodies and everything comes back empty.
+
+---
+
 # Console Commands
 
 ## Spawn Box3D Test Object
@@ -148,6 +197,15 @@ Disable:
 box3d.DebugDraw 0
 ```
 
+## Self-Checking Tests
+
+These need no level content and log a pass/fail tally.
+
+```console
+box3d.QueryTest
+box3d.EventTest
+```
+
 ---
 
 # Compatibility
@@ -166,8 +224,9 @@ This project is currently focused on the core Box3D integration.
 Current limitations:
 
 * No Chaos ↔ Box3D physics interaction
-* No multiplayer/network replication
-* No Blueprint API yet
+* Server-authoritative only — clients display replicated movement, no client prediction yet
+* No joints
+* The simulation steps on the game thread
 * Limited editor tooling
 
 Additional features will be added as the integration evolves.
@@ -176,15 +235,24 @@ Additional features will be added as the integration evolves.
 
 # Roadmap
 
-Planned improvements:
+Rough order of value, not a schedule.
 
-* Physics world management
-* Body creation helpers
-* Collision shape support
-* Unreal Actor / Component integration
-* Blueprint support
-* Debug visualization
-* Example project
+* **Joints.** Box3D has a full joint API and none of it is exposed yet. Doors, hinged debris,
+  ragdolls and vehicles currently have to fall back to Chaos, which means they can't share the
+  deterministic world. Biggest single gap.
+* **Async / off-thread stepping.** The step is a clean unit of work and could run alongside the
+  frame with the transform write-back on the game thread. Note the parallelism has to come from
+  stepping beside the frame, not from more solver workers — those repartition the constraint
+  graph and break determinism.
+* **Continuous collision and per-axis motion locks.** One property each on the component.
+  CCD matters as soon as anything fast-moving becomes a Box3D body.
+* **Landscape height fields.** Tri-mesh collision already works; a real height field would be
+  faster.
+* **Client-side prediction and rollback.** The snapshot, hash and replay pieces exist and are
+  proven headless; wiring them to a live client is the remaining work.
+* **Pre-solve contact events** for one-way platforms and conveyors. These run on solver
+  threads, so they can only ever be a C++ callback, never a Blueprint event.
+* **Example project.**
 
 ---
 
