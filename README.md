@@ -37,6 +37,10 @@ The goal of this project is to provide a clean and lightweight Unreal-friendly i
 * Box3D world and simulation support
 * Lightweight integration layer
 * Static mesh simulation support
+* Sphere, Box, Capsule and Convex Hulls support
+* Unreal Actor / Component integration
+* Debug visualization
+* Example map
 
 More features and examples will be added as the project evolves.
 
@@ -99,6 +103,10 @@ Alternatively, you can add the **Box3DBody Component** directly from the Actor C
 
 ![Adding Box3DBody Component](https://github.com/user-attachments/assets/8df90aab-c257-4f5e-bfc9-55cdea646532)
 
+I've also included an Example Map in the Content folder.
+
+<img width="1316" height="387" alt="image" src="https://github.com/user-attachments/assets/ad8f14c1-32c3-42c9-a832-c2ad992994e8" />
+
 ---
 
 ## Collision Setup
@@ -121,7 +129,6 @@ If you want Chaos to completely ignore the object, set the Collision Profile to:
 
 ![No Collision Setting](https://github.com/user-attachments/assets/b40c395d-887e-4d4d-8fa0-8e190cb88c42)
 
-![Uploading box3d_test.gif…]()
 ![Collision Example](https://github.com/user-attachments/assets/760fb108-8c4b-4125-8a48-61d3dc4268a7)
 
 ---
@@ -180,11 +187,7 @@ Planned improvements:
 
 * Physics world management
 * Body creation helpers
-* Collision shape support
-* Unreal Actor / Component integration
 * Blueprint support
-* Debug visualization
-* Example project
 
 ---
 
