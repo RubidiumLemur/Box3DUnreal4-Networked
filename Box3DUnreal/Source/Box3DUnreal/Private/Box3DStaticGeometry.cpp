@@ -21,15 +21,15 @@ namespace Box3D::StaticGeometry
 		constexpr int32 MaxHullVertices = 64;
 
 		// Local vertex (cm) -> box3d point (m): bake scale, negate Y (see Box3DConversion.h).
-		FORCEINLINE FVector3f LocalToBaked(const FVector& V, const FVector& Scale)
+		FORCEINLINE FVector LocalToBaked(const FVector& V, const FVector& Scale)
 		{
-			return FVector3f(
+			return FVector(
 				static_cast<float>(V.X * Scale.X * Box3D::UnrealToMeters),
 				static_cast<float>(-V.Y * Scale.Y * Box3D::UnrealToMeters),
 				static_cast<float>(V.Z * Scale.Z * Box3D::UnrealToMeters));
 		}
 
-		FORCEINLINE b3Vec3 ToB3(const FVector3f& V) { return b3Vec3{ V.X, V.Y, V.Z }; }
+		FORCEINLINE b3Vec3 ToB3(const FVector& V) { return b3Vec3{ V.X, V.Y, V.Z }; }
 
 		// UE and box3d use opposite front-face winding; the negate-Y flip already reconciles
 		// them, so only a mirrored (negative) scale needs reversing. bInvert = manual override.
@@ -78,7 +78,7 @@ namespace Box3D::StaticGeometry
 			// Validate now (in the editor) so a bad cloud fails visibly here, not at load.
 			TArray<b3Vec3> Converted;
 			Converted.Reserve(Shape.Points.Num());
-			for (const FVector3f& P : Shape.Points)
+			for (const FVector& P : Shape.Points)
 			{
 				Converted.Add(ToB3(P));
 			}
@@ -188,9 +188,9 @@ namespace Box3D::StaticGeometry
 			FBox3DBakedShape Shape;
 			Shape.Kind = EBox3DBakedShapeKind::Mesh;
 			Shape.Points.Reserve(TriData.Vertices.Num());
-			for (const FVector3f& V : TriData.Vertices)
+			for (const FVector& V : TriData.Vertices)
 			{
-				Shape.Points.Add(LocalToBaked(FVector(V), Scale));
+				Shape.Points.Add(LocalToBaked(V, Scale));
 			}
 
 			const bool bReverse = ShouldReverseWinding(Scale, bInvertWinding);
@@ -224,7 +224,7 @@ namespace Box3D::StaticGeometry
 			}
 			TArray<b3Vec3> Points;
 			Points.Reserve(Shape.Points.Num());
-			for (const FVector3f& P : Shape.Points)
+			for (const FVector& P : Shape.Points)
 			{
 				Points.Add(ToB3(P));
 			}
@@ -247,7 +247,7 @@ namespace Box3D::StaticGeometry
 
 			TArray<b3Vec3> Vertices;
 			Vertices.Reserve(Shape.Points.Num());
-			for (const FVector3f& P : Shape.Points)
+			for (const FVector& P : Shape.Points)
 			{
 				Vertices.Add(ToB3(P));
 			}

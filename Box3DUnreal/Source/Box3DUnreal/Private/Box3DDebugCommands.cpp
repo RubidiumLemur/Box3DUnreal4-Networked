@@ -241,7 +241,7 @@ namespace
 		DrawDebugDirectionalArrow(World, Hit.Location, Hit.Location + Hit.Normal * 50.0, 8.0f, FColor::Cyan, false,
 			QueryDrawSeconds, 0, 1.0f);
 		UE_LOG(LogBox3D, Log, TEXT("box3d.QueryRay: hit '%s' at %s (%.1fcm, tri %d), normal %s."),
-			Hit.HitActor ? *Hit.HitActor->GetName() : TEXT("<baked static>"), *Hit.Location.ToCompactString(),
+			Hit.HitActor.IsValid() ? *Hit.HitActor->GetName() : TEXT("<baked static>"), *Hit.Location.ToCompactString(),
 			Hit.Distance, Hit.TriangleIndex, *Hit.Normal.ToCompactString());
 	}
 

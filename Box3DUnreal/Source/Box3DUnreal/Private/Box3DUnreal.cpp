@@ -11,6 +11,13 @@ DEFINE_LOG_CATEGORY(LogBox3D);
 
 #define LOCTEXT_NAMESPACE "FBox3DUnrealModule"
 
+/**
+ * @brief Bootstraps the Box3D plugin for the current Unreal process.
+ *
+ * @details The module is intentionally minimal: it only applies the command-line disable flag and
+ * ensures the global plugin log/category is available. The actual world simulation and body
+ * integration are owned by the subsystem and component classes.
+ */
 void FBox3DUnrealModule::StartupModule()
 {
 	// -DisableBox3D on the launch command line seeds the master switch off. box3d.Enabled

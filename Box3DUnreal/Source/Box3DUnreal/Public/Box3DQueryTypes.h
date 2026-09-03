@@ -54,7 +54,7 @@ struct BOX3DUNREAL_API FBox3DHitResult
 	/** Actor owning the hit body. Null for baked static geometry, which has no
 	 *  source actor at runtime (bodies are instantiated straight from the asset). */
 	UPROPERTY(BlueprintReadOnly, Category = "Box3D|Query")
-	TObjectPtr<AActor> HitActor = nullptr;
+	TWeakObjectPtr<AActor> HitActor = nullptr;
 
 	/** Triangle hit on a mesh/height-field shape, else -1. */
 	UPROPERTY(BlueprintReadOnly, Category = "Box3D|Query")

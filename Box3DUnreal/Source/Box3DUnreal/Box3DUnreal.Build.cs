@@ -1,8 +1,24 @@
+/**
+ * @file
+ * @brief Builds and links the Box3D native library into the Unreal module.
+ *
+ * @details The runtime plugin depends on a bundled box3d library under ThirdParty. This build file
+ * resolves the native library, configures the correct include directories, and ensures the library is
+ * built once for the active platform before linking into the module.
+ */
 using System;
 using System.Diagnostics;
 using System.IO;
 using UnrealBuildTool;
 
+/**
+ * @brief Unreal module rules for the Box3DUnreal integration.
+ *
+ * @details This module is responsible for locating the box3d native library, building it when
+ * necessary, and exposing the public include paths and linker settings needed by the rest of the
+ * plugin. The build is intentionally explicit so the engine uses the same box3d ABI consistently
+ * across editor and runtime builds.
+ */
 public class Box3DUnreal : ModuleRules
 {
 	public Box3DUnreal(ReadOnlyTargetRules Target) : base(Target)
@@ -11,7 +27,7 @@ public class Box3DUnreal : ModuleRules
 
 		PublicDependencyModuleNames.AddRange(new[] { "Core" });
 		// PhysicsCore: FTriMeshCollisionData / FTriIndices for static tri-mesh extraction.
-		PrivateDependencyModuleNames.AddRange(new[] { "CoreUObject", "Engine", "PhysicsCore" });
+		PrivateDependencyModuleNames.AddRange(new[] { "CoreUObject", "Engine", "PhysicsCore", "DeveloperSettings" });
 
 		// ThirdParty/ holds the wrapper CMakeLists.txt and the box3d submodule.
 		string ThirdPartyPath = Path.GetFullPath(Path.Combine(ModuleDirectory, "..", "..", "ThirdParty"));
@@ -141,7 +157,8 @@ public class Box3DUnreal : ModuleRules
 	// then the copy bundled with Visual Studio, then a standalone install.
 	private string FindCMake()
 	{
-		if (TryResolveFromPath("cmake", out string OnPath))
+		string OnPath;
+		if (TryResolveFromPath("cmake", out OnPath))
 		{
 			return OnPath;
 		}

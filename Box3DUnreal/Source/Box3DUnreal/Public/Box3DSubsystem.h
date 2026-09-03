@@ -10,17 +10,40 @@
 #include "Box3DSubsystem.generated.h"
 
 class AActor;
+class APlayerController;
 class UBox3DBodyComponent;
+class ABox3DInstancedBodyActor;
 class UBox3DCollisionData;
 class ULevel;
 
 /**
- * Owns the single box3d world for a UWorld and advances it on a fixed timestep.
+ * @brief Historical snapshot of a Box3D body for rewind and validation.
  *
- * One instance exists per Game/PIE world, so editor, each PIE session, and
- * standalone each get an isolated simulation with correct create/destroy on the
- * world lifecycle. Dynamic body components register here to be stepped and to have
- * their owning actors driven with render-frame interpolation.
+ * @details This structure stores the minimal state needed to restore and re-simulate an
+ * authoritative body at a prior tick. It is intentionally bounded and used by the server-side
+ * replay path to validate client input without trusting any actor-side transform as authority.
+ */
+USTRUCT()
+struct FBox3DHistoryFrame
+{
+	GENERATED_BODY()
+
+	int64 SimulationTick = 0;
+	double Timestamp = 0.0;
+	FVector Location = FVector::ZeroVector;
+	FRotator Rotation = FRotator::ZeroRotator;
+	FVector LinearVelocity = FVector::ZeroVector;
+	FVector AngularVelocity = FVector::ZeroVector;
+	bool bSleeping = false;
+};
+
+/**
+ * @brief World-scoped owner of the Box3D simulation.
+ *
+ * @details The subsystem creates and owns the single Box3D world used by the current Unreal
+ * world. It advances the simulation on a fixed timestep, registers dynamic and kinematic bodies,
+ * handles static geometry, and maintains the bounded historical state used by the server-side
+ * rewind and validation flow for networked bodies.
  */
 // Config=Game: world-subsystem UPROPERTYs have no details-panel, so the bulk-static
 // settings are read from DefaultGame.ini's [/Script/Box3DUnreal.Box3DSubsystem].
@@ -32,7 +55,7 @@ class BOX3DUNREAL_API UBox3DSubsystem : public UTickableWorldSubsystem
 public:
 	// USubsystem / UWorldSubsystem
 	virtual bool DoesSupportWorldType(const EWorldType::Type WorldType) const override;
-	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
+	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 
 	// FTickableGameObject (via UTickableWorldSubsystem)
@@ -68,6 +91,8 @@ public:
 	void RegisterDynamicBody(UBox3DBodyComponent* Component);
 	void RegisterKinematicBody(UBox3DBodyComponent* Component);
 	void UnregisterBody(UBox3DBodyComponent* Component);
+	void RegisterInstancedBodyActor(ABox3DInstancedBodyActor* Actor);
+	void UnregisterInstancedBodyActor(ABox3DInstancedBodyActor* Actor);
 
 	// --- Spatial queries (doc §11) --------------------------------------------------
 	// All positions/extents are Unreal world space in cm; results come back the same way.
@@ -110,6 +135,28 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Box3D|Query")
 	bool BoxCast(const FVector& Start, const FVector& End, const FVector& HalfExtent, const FRotator& Rotation,
 		const FBox3DQueryFilter& Filter, FBox3DHitResult& OutHit) const;
+
+	/**
+	 * @brief Records the current authoritative state for a body into the bounded rewind history.
+	 *
+	 * @details This is used on the authoritative server to capture the minimal state required for
+	 * later validation and replay. The data is stored in a bounded ring-like history window so the
+	 * server can rewind only the relevant state without unbounded memory growth.
+	 */
+	void CaptureNetworkHistoryForBody(UBox3DBodyComponent* Body);
+	/**
+	 * @brief Attempts to restore the closest historical body state matching the client's requested tick.
+	 *
+	 * @return True when a valid frame exists within the configured rewind window and was copied to OutState.
+	 */
+	bool TryRewindBodyHistory(UBox3DBodyComponent* Body, int64 RequestTick, double RequestTimestamp,
+		FBox3DHistoryFrame& OutState) const;
+	/** @brief Restores a previously captured historical state back onto the authoritative body. */
+	void RestoreBodyHistory(UBox3DBodyComponent* Body, const FBox3DHistoryFrame& State);
+	/** @brief Returns whether a body is within the current player's relevance distance. */
+	bool IsBodyRelevantToPlayer(const UBox3DBodyComponent* Body, const APlayerController* PC) const;
+	/** @brief Returns whether a body is within a given location-based relevance threshold. */
+	bool IsBodyRelevantToPlayerLocation(const UBox3DBodyComponent* Body, const FVector& PlayerLocation) const;
 
 protected:
 	void CreateBox3DWorld();
@@ -218,6 +265,18 @@ private:
 
 	/** Every registered body (all types), used only for debug draw. */
 	TArray<TWeakObjectPtr<UBox3DBodyComponent>> AllBodies;
+
+	/** Actors that own compact arrays of Box3D bodies rendered through HISM instances. */
+	TArray<TWeakObjectPtr<ABox3DInstancedBodyActor>> InstancedBodyActors;
+
+	/** Networked Box3D state buffer: a bounded rewind history for server validation. */
+	UPROPERTY(EditAnywhere, Config, Category = "Box3D|Network")
+	float NetworkRewindSeconds = 0.5f;
+
+	UPROPERTY(EditAnywhere, Config, Category = "Box3D|Network", meta = (ClampMin = "1"))
+	int32 NetworkRewindMaxFrames = 120;
+
+	TMap<TWeakObjectPtr<UBox3DBodyComponent>, TArray<FBox3DHistoryFrame>> NetworkHistory;
 
 	/** box3d resources for one level's bulk-registered static geometry. Not UPROPERTYs -
 	 *  these are raw box3d handles this subsystem owns and destroys explicitly. */

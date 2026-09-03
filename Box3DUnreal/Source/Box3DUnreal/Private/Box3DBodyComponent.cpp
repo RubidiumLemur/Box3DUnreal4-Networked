@@ -75,14 +75,23 @@ namespace
 
 UBox3DBodyComponent::UBox3DBodyComponent()
 {
-	// The subsystem drives capture/interpolation; the component itself never ticks.
-	PrimaryComponentTick.bCanEverTick = false;
+	// The component uses a lightweight client-side smoothing pass for replicated transforms.
+	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.bStartWithTickEnabled = true;
+	SetIsReplicatedByDefault(true);
+}
+
+void UBox3DBodyComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(UBox3DBodyComponent, ReplicatedState);
 }
 
 void UBox3DBodyComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
+	PrimaryComponentTick.SetTickFunctionEnable(!GetOwner()->HasAuthority());
 	Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UBox3DSubsystem>() : nullptr;
 	if (Subsystem == nullptr)
 	{
@@ -148,6 +157,7 @@ bool UBox3DBodyComponent::ComputeSimulationEligibility()
 
 	return true;
 }
+
 
 void UBox3DBodyComponent::RebuildSimulationBody()
 {
@@ -226,6 +236,127 @@ void UBox3DBodyComponent::EnableReplication()
 	Owner->SetReplicateMovement(true);
 }
 
+bool UBox3DBodyComponent::IsWithinMaxServerDistance(const AActor* OtherActor) const
+{
+	if (OtherActor == nullptr || GetOwner() == nullptr)
+	{
+		return false;
+	}
+
+	const float MaxDistanceSq = MaxServerDistance * MaxServerDistance;
+	const float DistSq = (OtherActor->GetActorLocation() - GetOwner()->GetActorLocation()).SizeSquared();
+	return DistSq <= MaxDistanceSq;
+}
+
+void UBox3DBodyComponent::TickComponent(float DeltaTime, ELevelTick TickType,
+	FActorComponentTickFunction* ThisTickFunction)
+{
+	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+
+	if (GetOwner() == nullptr || GetOwner()->HasAuthority() || !bHasReceivedAuthoritativeState)
+	{
+		return;
+	}
+
+	const FVector CurrentLocation = GetOwner()->GetActorLocation();
+	const FRotator CurrentRotation = GetOwner()->GetActorRotation();
+	const FVector TargetLocation = ReplicatedState.GetLocation();
+	const FRotator TargetRotation = ReplicatedState.GetRotation();
+	const FVector SmoothedLocation = FMath::VInterpTo(CurrentLocation, TargetLocation, DeltaTime, 20.0f);
+	const FRotator SmoothedRotation = FMath::RInterpTo(CurrentRotation, TargetRotation, DeltaTime, 20.0f);
+	GetOwner()->SetActorLocationAndRotation(SmoothedLocation, SmoothedRotation, false, nullptr, ETeleportType::None);
+}
+
+void UBox3DBodyComponent::OnRep_NetworkState()
+{
+	if (GetOwner() == nullptr || GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
+	bHasReceivedAuthoritativeState = true;
+	SmoothedNetworkLocation = GetOwner()->GetActorLocation();
+	SmoothedNetworkRotation = GetOwner()->GetActorRotation();
+	GetOwner()->SetActorLocationAndRotation(ReplicatedState.GetLocation(), ReplicatedState.GetRotation(), false, nullptr,
+		ETeleportType::None);
+}
+
+bool UBox3DBodyComponent::ServerSubmitInput_Validate(const FBox3DNetworkInputRequest& Request)
+{
+	return Request.SequenceNumber != 0 || Request.SimulationTick >= 0;
+}
+
+void UBox3DBodyComponent::ServerSubmitInput_Implementation(const FBox3DNetworkInputRequest& Request)
+{
+	if (GetOwner() == nullptr || !GetOwner()->HasAuthority())
+	{
+		return;
+	}
+
+	if (Subsystem == nullptr)
+	{
+		return;
+	}
+
+	// Server authority: validate the request against the historical authoritative state, then
+	// apply the server-side result and replicate the corrected state back to relevant clients.
+	FBox3DHistoryFrame HistoricalState;
+	if (!Subsystem->TryRewindBodyHistory(this, Request.SimulationTick, Request.Timestamp, HistoricalState))
+	{
+		return;
+	}
+
+	const FTransform Current = GetOwner()->GetActorTransform();
+	const FVector Delta = Request.DesiredLocation - Current.GetLocation();
+	const float MaxAllowedDeltaSq = 250000.0f;
+	if (Delta.SizeSquared() > MaxAllowedDeltaSq)
+	{
+		return;
+	}
+
+	const double CurrentTime = GetWorld()->GetTimeSeconds();
+	if (Request.SequenceNumber <= LastReplicatedSequence)
+	{
+		return;
+	}
+	if (LastReplicatedNetworkTime >= 0.0 && (CurrentTime - LastReplicatedNetworkTime) < ReplicationIntervalSeconds)
+	{
+		return;
+	}
+
+	const FBox3DNetworkState NewState = FBox3DNetworkState::Pack(
+		Request.DesiredLocation,
+		Request.DesiredRotation,
+		Request.RequestedLinearVelocity,
+		Request.RequestedAngularVelocity,
+		Request.SimulationTick,
+		Request.Timestamp,
+		Request.SequenceNumber,
+		false);
+
+	if (ReplicatedState.IsEquivalentTo(NewState))
+	{
+		return;
+	}
+
+	ReplicatedState = NewState;
+	LastReplicatedSequence = Request.SequenceNumber;
+	LastReplicatedNetworkTime = CurrentTime;
+
+	// Release the exact authoritative transform to the owning actor so the server world remains
+	// authoritative while still allowing clients to reconcile using the authoritative data.
+	GetOwner()->SetActorLocationAndRotation(Request.DesiredLocation, Request.DesiredRotation, false, nullptr,
+		ETeleportType::None);
+	Subsystem->CaptureNetworkHistoryForBody(this);
+	ClientReceiveAuthoritativeState(ReplicatedState);
+}
+
+void UBox3DBodyComponent::ClientReceiveAuthoritativeState_Implementation(const FBox3DNetworkState& State)
+{
+	ReplicatedState = State;
+	OnRep_NetworkState();
+}
+
 void UBox3DBodyComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	if (Subsystem != nullptr)
@@ -254,6 +385,8 @@ void UBox3DBodyComponent::CreateBody()
 	Def.rotation = Box3D::ToBox3DQuat(ActorXform.GetRotation());
 	Def.linearDamping = LinearDamping;
 	Def.angularDamping = AngularDamping;
+	Def.enableSleep = bEnableSleep;
+	Def.sleepThreshold = SleepThreshold * static_cast<float>(Box3D::UnrealToMeters);
 
 	// Lets a query hit resolve back to the actor. Safe because DestroyBody runs on EndPlay,
 	// so the body never outlives the owner.
@@ -555,6 +688,11 @@ void UBox3DBodyComponent::DrawDebug() const
 	case EBox3DBodyType::Kinematic: Color = FColor::Yellow; break;
 	default: break;
 	}
+	if (BodyType == EBox3DBodyType::Dynamic && B3_IS_NON_NULL(BodyId) &&
+		Subsystem != nullptr && Subsystem->IsWorldValid() && !b3Body_IsAwake(BodyId))
+	{
+		Color = FColor::Red;
+	}
 
 	switch (Shape)
 	{
@@ -586,4 +724,16 @@ void UBox3DBodyComponent::DrawDebug() const
 		DrawDebugBox(World, Location, ResolvedHalfExtent, Rotation, Color, false, -1.0f, 0, 1.0f);
 		break;
 	}
+}
+
+bool UBox3DBodyComponent::AddImpulse(const FVector& Impulse)
+{
+	if (GetOwner() == nullptr || !GetOwner()->HasAuthority() || BodyType != EBox3DBodyType::Dynamic ||
+		B3_IS_NULL(BodyId) || Subsystem == nullptr || !Subsystem->IsWorldValid() || Impulse.ContainsNaN())
+	{
+		return false;
+	}
+
+	b3Body_ApplyLinearImpulseToCenter(BodyId, Box3D::ToBox3DVector(Impulse), true);
+	return true;
 }

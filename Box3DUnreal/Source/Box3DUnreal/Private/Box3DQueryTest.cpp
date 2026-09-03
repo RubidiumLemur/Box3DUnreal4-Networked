@@ -99,9 +99,9 @@ namespace
 		// Per axis: start TestRayOffset out on the negative side and cast through the cube.
 		// The closest hit must be the near face, with an outward normal facing the ray.
 		const TPair<FVector, const TCHAR*> Axes[] = {
-			{ FVector(1.0, 0.0, 0.0), TEXT("+X") },
-			{ FVector(0.0, 1.0, 0.0), TEXT("+Y") },
-			{ FVector(0.0, 0.0, 1.0), TEXT("+Z") },
+			TPair<FVector, const TCHAR*>(FVector(1.0, 0.0, 0.0), TEXT("+X")),
+			TPair<FVector, const TCHAR*>(FVector(0.0, 1.0, 0.0), TEXT("+Y")),
+			TPair<FVector, const TCHAR*>(FVector(0.0, 0.0, 1.0), TEXT("+Z")),
 		};
 
 		for (const TPair<FVector, const TCHAR*>& Axis : Axes)

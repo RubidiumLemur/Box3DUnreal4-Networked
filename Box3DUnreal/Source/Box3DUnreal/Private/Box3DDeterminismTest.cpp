@@ -137,7 +137,7 @@ namespace
 		{
 			const b3Pos P = b3Body_GetTransform(A[i]).p;
 			const b3Pos Q = b3Body_GetTransform(B[i]).p;
-			Max = FMath::Max(Max, FMath::Sqrt(
+			Max = FMath::Max<double>(Max, FMath::Sqrt(
 				(P.x - Q.x) * (P.x - Q.x) + (P.y - Q.y) * (P.y - Q.y) + (P.z - Q.z) * (P.z - Q.z)));
 		}
 		return Max;

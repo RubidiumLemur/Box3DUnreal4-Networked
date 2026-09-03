@@ -32,7 +32,7 @@ struct FBox3DBakedShape
 
 	// Hull point cloud, or Mesh vertices. Empty for sphere/capsule.
 	UPROPERTY()
-	TArray<FVector3f> Points;
+	TArray<FVector> Points;
 
 	// Mesh triangle indices (3 per triangle). Empty unless Kind == Mesh.
 	UPROPERTY()
@@ -40,11 +40,11 @@ struct FBox3DBakedShape
 
 	// Sphere center / capsule first hemisphere center.
 	UPROPERTY()
-	FVector3f CenterA = FVector3f::ZeroVector;
+	FVector CenterA = FVector::ZeroVector;
 
 	// Capsule second hemisphere center (unused otherwise).
 	UPROPERTY()
-	FVector3f CenterB = FVector3f::ZeroVector;
+	FVector CenterB = FVector::ZeroVector;
 
 	// Sphere / capsule radius (meters).
 	UPROPERTY()

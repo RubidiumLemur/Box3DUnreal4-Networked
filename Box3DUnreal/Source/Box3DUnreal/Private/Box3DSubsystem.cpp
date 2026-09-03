@@ -2,6 +2,7 @@
 
 #include "Box3DSubsystem.h"
 #include "Box3DBodyComponent.h"
+#include "Box3DInstancedBodyActor.h"
 #include "Box3DCollisionData.h"
 #include "Box3DConversion.h"
 #include "Box3DStaticGeometry.h"
@@ -32,20 +33,39 @@ bool UBox3DSubsystem::IsBox3DEnabled()
 	return CVarBox3DEnabled.GetValueOnGameThread() != 0;
 }
 
+void UBox3DSubsystem::RegisterInstancedBodyActor(ABox3DInstancedBodyActor* Actor)
+{
+	if (Actor != nullptr)
+	{
+		InstancedBodyActors.AddUnique(Actor);
+	}
+}
+
+void UBox3DSubsystem::UnregisterInstancedBodyActor(ABox3DInstancedBodyActor* Actor)
+{
+	InstancedBodyActors.RemoveSingleSwap(Actor);
+}
+
 bool UBox3DSubsystem::DoesSupportWorldType(const EWorldType::Type WorldType) const
 {
 	// Simulation only runs in play worlds. Editor preview support can be added later.
 	return WorldType == EWorldType::Game || WorldType == EWorldType::PIE;
 }
 
-void UBox3DSubsystem::OnWorldBeginPlay(UWorld& InWorld)
+void UBox3DSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
-	Super::OnWorldBeginPlay(InWorld);
+	Super::Initialize(Collection);
+
+	UWorld* World = GetWorld();
+	if (World == nullptr)
+	{
+		return;
+	}
 
 	// box3d is server-authoritative: only Standalone and servers simulate. A pure
 	// client leaves its actors to UE's replicated movement, so it never spins up a
 	// second (diverging) world.
-	bIsAuthority = InWorld.GetNetMode() != NM_Client;
+	bIsAuthority = World->GetNetMode() != NM_Client;
 
 	// Watch box3d.Enabled so it can be toggled live in PIE. The sink fires for any cvar
 	// change; OnEnabledCVarChanged filters to an actual on<->off transition.
@@ -68,7 +88,9 @@ void UBox3DSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 		UE_LOG(LogBox3D, Log,
 			TEXT("box3d: disabled (box3d.Enabled=0 / -DisableBox3D). Set 'box3d.Enabled 1' to build the simulation."));
 	}
+
 }
+
 
 void UBox3DSubsystem::EnableSimulation()
 {
@@ -196,6 +218,7 @@ void UBox3DSubsystem::Deinitialize()
 	DynamicBodies.Reset();
 	KinematicBodies.Reset();
 	AllBodies.Reset();
+	InstancedBodyActors.Reset();
 	bEnabledActive = false;
 
 	Super::Deinitialize();
@@ -569,6 +592,93 @@ void UBox3DSubsystem::UnregisterBody(UBox3DBodyComponent* Component)
 	DynamicBodies.RemoveSingleSwap(Component);
 	KinematicBodies.RemoveSingleSwap(Component);
 	AllBodies.RemoveSingleSwap(Component);
+	NetworkHistory.Remove(Component);
+}
+
+void UBox3DSubsystem::CaptureNetworkHistoryForBody(UBox3DBodyComponent* Body)
+{
+	if (Body == nullptr || Body->GetOwner() == nullptr)
+	{
+		return;
+	}
+
+	FBox3DHistoryFrame Frame;
+	Frame.SimulationTick = GetSimulationFrame();
+	Frame.Timestamp = FPlatformTime::Seconds();
+	Frame.Location = Body->GetOwner()->GetActorLocation();
+	Frame.Rotation = Body->GetOwner()->GetActorRotation();
+	Frame.LinearVelocity = FVector::ZeroVector;
+	Frame.AngularVelocity = FVector::ZeroVector;
+	Frame.bSleeping = false;
+
+	TArray<FBox3DHistoryFrame>& History = NetworkHistory.FindOrAdd(Body);
+	History.Add(Frame);
+	if (History.Num() > NetworkRewindMaxFrames)
+	{
+		History.RemoveAt(0, History.Num() - NetworkRewindMaxFrames, false);
+	}
+}
+
+bool UBox3DSubsystem::TryRewindBodyHistory(UBox3DBodyComponent* Body, int64 RequestTick, double RequestTimestamp,
+	FBox3DHistoryFrame& OutState) const
+{
+	if (Body == nullptr)
+	{
+		return false;
+	}
+
+	const TArray<FBox3DHistoryFrame>* History = NetworkHistory.Find(Body);
+	if (History == nullptr || History->Num() == 0)
+	{
+		return false;
+	}
+
+	for (int32 Index = History->Num() - 1; Index >= 0; --Index)
+	{
+		const FBox3DHistoryFrame& Candidate = (*History)[Index];
+		const int64 TickDelta = RequestTick - Candidate.SimulationTick;
+		const double Age = RequestTimestamp - Candidate.Timestamp;
+		if (TickDelta >= 0 && TickDelta <= NetworkRewindMaxFrames && Age >= 0.0 && Age <= NetworkRewindSeconds)
+		{
+			OutState = Candidate;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void UBox3DSubsystem::RestoreBodyHistory(UBox3DBodyComponent* Body, const FBox3DHistoryFrame& State)
+{
+	if (Body == nullptr || Body->GetOwner() == nullptr)
+	{
+		return;
+	}
+
+	Body->GetOwner()->SetActorLocationAndRotation(State.Location, State.Rotation, false, nullptr,
+		ETeleportType::TeleportPhysics);
+}
+
+bool UBox3DSubsystem::IsBodyRelevantToPlayerLocation(const UBox3DBodyComponent* Body, const FVector& PlayerLocation) const
+{
+	if (Body == nullptr || Body->GetOwner() == nullptr)
+	{
+		return false;
+	}
+
+	const float DistanceSq = (PlayerLocation - Body->GetOwner()->GetActorLocation()).SizeSquared();
+	const float MaxDistanceSq = Body->MaxServerDistance * Body->MaxServerDistance;
+	return DistanceSq <= MaxDistanceSq;
+}
+
+bool UBox3DSubsystem::IsBodyRelevantToPlayer(const UBox3DBodyComponent* Body, const APlayerController* PC) const
+{
+	if (Body == nullptr || PC == nullptr || PC->GetPawn() == nullptr)
+	{
+		return false;
+	}
+
+	return IsBodyRelevantToPlayerLocation(Body, PC->GetPawn()->GetActorLocation());
 }
 
 bool UBox3DSubsystem::IsTickable() const
@@ -715,10 +825,23 @@ void UBox3DSubsystem::StepFixed(float DeltaTime)
 			if (UBox3DBodyComponent* Body = DynamicBodies[Index].Get())
 			{
 				Body->CaptureStepTransform();
+				CaptureNetworkHistoryForBody(Body);
 			}
 			else
 			{
 				DynamicBodies.RemoveAtSwap(Index);
+			}
+		}
+
+		for (int32 Index = InstancedBodyActors.Num() - 1; Index >= 0; --Index)
+		{
+			if (ABox3DInstancedBodyActor* Actor = InstancedBodyActors[Index].Get())
+			{
+				Actor->UpdateSimulationInstances();
+			}
+			else
+			{
+				InstancedBodyActors.RemoveAtSwap(Index);
 			}
 		}
 	}

@@ -214,10 +214,8 @@ bool UBox3DBakeCommandlet::BakeMap(const FString& MapPackageName, const FString&
 	const FString Filename = FPackageName::LongPackageNameToFilename(
 		OutPackageName, FPackageName::GetAssetPackageExtension());
 
-	FSavePackageArgs SaveArgs;
-	SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-	SaveArgs.SaveFlags = SAVE_NoError;
-	if (!UPackage::SavePackage(OutPkg, Data, *Filename, SaveArgs))
+	if (!UPackage::SavePackage(OutPkg, Data, RF_Public | RF_Standalone, *Filename,
+		GError, nullptr, false, true, SAVE_NoError))
 	{
 		UE_LOG(LogBox3D, Error, TEXT("Box3DBake: failed to save '%s'."), *Filename);
 		return false;
